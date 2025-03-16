@@ -68,10 +68,13 @@ Private Sub removeNewlinesAndConvertToHalfwidth()
     processedText_tmp = Replace(processedText_tmp, vbLf, "")    'セル内改行削除
     processedText_tmp = Replace(processedText_tmp, vbNewLine, "")    'セル内改行削除
 
+    ' 半角へ変換
+    processedText_tmp = StrConv(processedText_tmp, vbNarrow) '半角へ変換
+
     processedText = processedText_tmp
 
     ' 出力
-    ' Debug.Print ("入力文字：" & processedText)
+    ' Debug.Print ("入力文字(処理後)：" & processedText)
 End Sub
 
 
