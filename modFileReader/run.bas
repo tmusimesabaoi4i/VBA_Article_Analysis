@@ -11,7 +11,7 @@ Public Sub ReadFile()
     Call removeNewlinesAndConvertToHalfwidth
 End Sub
 
-' ファイルの読み込み (プライベート)
+' ファイル名の読み込み (プライベート)
 Private Sub getFilePathFromCellA1()
     Dim filePath_tmp As String
 
@@ -30,8 +30,8 @@ Private Sub getFilePathFromCellA1()
     filePath = ThisWorkbook.Path & "\" & filePath_tmp
 
     ' 出力
-    Debug.Print ("ファイル名：" & filePath_tmp)
-    Debug.Print ("ファイルパス：" & filePath)
+    ' Debug.Print ("ファイル名：" & filePath_tmp)
+    ' Debug.Print ("ファイルパス：" & filePath)
 End Sub
 
 ' ファイルの読み込み (プライベート)
