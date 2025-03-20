@@ -222,7 +222,7 @@ target (TextArrayManager): 削除対象のテキストを保持するインス�
         Set reducedManager = manager.RemoveMatchingText(targetManager)
         Debug.Print reducedManager.GetOriginalText()
     ```
-    
+
 ### 使用例（サンプルコード）
 以下は、各メソッドの利用例として参考にしてください。
   ```vba
@@ -251,3 +251,7 @@ target (TextArrayManager): 削除対象のテキストを保持するインス�
         Next i
     End Sub
     ```
+
+
+
+aaaa
