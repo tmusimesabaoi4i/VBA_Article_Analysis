@@ -225,6 +225,7 @@ target (TextArrayManager): 削除対象のテキストを保持するインス�
 
 ### 使用例（サンプルコード）
 以下は、各メソッドの利用例として参考にしてください。
+
     ```vba
         Sub TestTextArrayManager()
             Dim manager As New TextArrayManager
