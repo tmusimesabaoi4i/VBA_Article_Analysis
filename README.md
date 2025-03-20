@@ -72,9 +72,9 @@
 - **パラメータ**:
   - `text` (String): 設定するテキスト
 - **使用例**:
-  ```vba
-  Dim manager As New TextArrayManager
-  manager.SetOriginalText "これは1行目です。" & vbCrLf & "これは2行目です。"
+    ```vba
+        Dim manager As New TextArrayManager
+        manager.SetOriginalText "これは1行目です。" & vbCrLf & "これは2行目です。"
     ```
 
 ### 2. GetOriginalText() As String
@@ -213,36 +213,35 @@ target (TextArrayManager): 削除対象のテキストを保持するインス�
 戻り値: TextArrayManager
 - **使用例**:
   ```vba
-Dim reducedManager As TextArrayManager
-Set reducedManager = manager.RemoveMatchingText(targetManager)
-Debug.Print reducedManager.GetOriginalText()
-使用例（サンプルコード）
+    Dim reducedManager As TextArrayManager
+    Set reducedManager = manager.RemoveMatchingText(targetManager)
+    Debug.Print reducedManager.GetOriginalText()
+    ```
+### 使用例（サンプルコード）
 以下は、各メソッドの利用例として参考にしてください。
-
-vba
-
-Sub TestTextArrayManager()
-    Dim manager As New TextArrayManager
-    Dim sampleText As String
-    Dim i As Long
-    
-    sampleText = "これは1行目です。" & vbCrLf & _
-                 "開始ターゲット" & vbCrLf & _
-                 "抽出する内容1" & vbCrLf & _
-                 "抽出する内容2" & vbCrLf & _
-                 "終了ターゲット" & vbCrLf & _
-                 "これは別の行です。"
-    
-    ' テキストを設定
-    manager.SetOriginalText sampleText
-    
-    ' 特定の行を抽出する例
-    Dim extractedManager As TextArrayManager
-    Set extractedManager = manager.ExtractLines("開始ターゲット")
-    
-    ' 結果を表示
-    For i = 0 To extractedManager.GetLineCount() - 1
-        Debug.Print extractedManager.GetLinesArray()(i)
-    Next i
-End Sub
+  ```vba
+    Sub TestTextArrayManager()
+        Dim manager As New TextArrayManager
+        Dim sampleText As String
+        Dim i As Long
+        
+        sampleText = "これは1行目です。" & vbCrLf & _
+                    "開始ターゲット" & vbCrLf & _
+                    "抽出する内容1" & vbCrLf & _
+                    "抽出する内容2" & vbCrLf & _
+                    "終了ターゲット" & vbCrLf & _
+                    "これは別の行です。"
+        
+        ' テキストを設定
+        manager.SetOriginalText sampleText
+        
+        ' 特定の行を抽出する例
+        Dim extractedManager As TextArrayManager
+        Set extractedManager = manager.ExtractLines("開始ターゲット")
+        
+        ' 結果を表示
+        For i = 0 To extractedManager.GetLineCount() - 1
+            Debug.Print extractedManager.GetLinesArray()(i)
+        Next i
+    End Sub
     ```
