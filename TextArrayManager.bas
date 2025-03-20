@@ -381,171 +381,27 @@ Public Function IsEqual(ByVal otherManager As TextArrayManager) As Boolean
     Set IsEqual = True
 End Function
 
-
-' サンプル
-' 
-        ' Sub TestFindLinesMatch()
-        '     Dim manager1 As New TextArrayManager
-        '     Dim manager2 As New TextArrayManager
-        '     Dim sampleText1 As String
-        '     Dim sampleText2 As String
-        '     Dim result As Variant
-            
-        '     ' sampleText1 と sampleText2 の内容を設定
-        '     sampleText1 = "これは1行目です。" & vbCrLf & _
-        '                  "開始：完全一致行です。" & vbCrLf & _
-        '                  "これは3行目です。" & vbCrLf & _
-        '                  "部分一致テスト行です。" & vbCrLf & _
-        '                  "開始：完全一致行です。" & vbCrLf & _
-        '                  "開始：完全一致行です。" & vbCrLf & _
-        '                  "終了：完全一致行です。" & vbCrLf & _
-        '                  "完全一致行です。" & vbCrLf & _
-            
-        '     sampleText2 = "開始：完全一致行です。" & vbCrLf & _
-        '                  "終了：完全一致行です。"
-            
-        '     ' manager1 と manager2 にテキストを設定
-        '     manager1.SetOriginalText sampleText1
-        '     manager2.SetOriginalText sampleText2
-            
-        '     ' manager1 における manager2 の位置を検索
-        '     result = manager1.FindLinesMatch(manager2)
-            
-        '     ' 結果を表示
-        '     If result(1) <> -1 Then
-        '         Debug.Print "一致範囲: 開始行 = " & result(1) & " 終了行 = " & result(2)
-        '     Else
-        '         Debug.Print "一致する範囲は見つかりませんでした。"
-        '     End If
-        ' End Sub
-' FindLinesMatch メソッド
-' 
-' このメソッドは、現在の TextArrayManager インスタンス（Me）の LinesArray と
-' 指定された target の LinesArray を比較し、target の行が Me の中に完全に一致する範囲を特定します。
-' 一致が見つかると、Me の中で target がどこにあるかを示す開始行と終了行を返します。
-' 
-' 入力: 
-'   target - 比較対象となる TextArrayManager インスタンス
-' 
-' 出力: 
-'   配列（1行目 - 開始行、2行目 - 終了行）
-'   一致が見つからない場合は、-1,-1 を返します。
-Public Function FindLinesMatch(target As TextArrayManager) As Variant
-    Dim startLine As Long
-    Dim endLine As Long
-    Dim i As Long
-    Dim j As Long
-    Dim matchFound As Boolean
-    Dim result(1 To 2) As Long ' 配列[0] - 開始行, [1] - 終了行
-    
-    ' 一致が見つかったかどうかを追跡するフラグ
-    matchFound = False
-    startLine = -1
-    endLine = -1
-    
-    ' MeのLinesArrayとtargetのLinesArrayを比較
-    ' Meの各行について、target.LinesArray(0)と一致する行を探す
-    For i = LBound(LinesArray) To UBound(LinesArray)
-        ' Me(i) と target の1行目を比較
-        If Trim(LinesArray(i)) = Trim(target.GetLinesArray()(0)) Then
-            startLine = i ' 一致した最初の行をstartLineとして設定
-            ' startLine から target.LinesArray の各行を順番に比較
-            For j = LBound(target.GetLinesArray()) To UBound(target.GetLinesArray())
-                ' targetの行をMeの対応する行と比較
-                ' Me(i + j) が target(j) と一致するか確認
-                If i + j <= UBound(LinesArray) And Trim(LinesArray(i + j)) = Trim(target.GetLinesArray()(j)) Then
-                    ' 一致した場合、endLineを更新
-                    If j = UBound(target.GetLinesArray()) Then
-                        endLine = i + j ' 最後の一致行
-                        matchFound = True ' 一致が見つかったことを記録
-                    End If
-                Else
-                    ' 一致しなかった場合、比較を終了
-                    matchFound = False
-                    Exit For ' targetの残りの行との一致を確認しない
-                End If
-            Next j
-        End If
-        
-        ' 一致した場合、ループを抜ける
-        If matchFound Then Exit For
-    Next i
-    
-    ' 結果を格納
-    ' 一致が見つかった場合、startLine と endLine を格納
-    If matchFound Then
-        result(1) = startLine
-        result(2) = endLine
-    Else
-        ' 一致しなかった場合、-1をセット（範囲なし）
-        result(1) = -1
-        result(2) = -1
-    End If
-    
-    ' 結果を返す
-    FindLinesMatch = result
-End Function
-
-
-' 新しいメソッド：RemoveMatchingLines
-Public Function RemoveMatchingLines(targetManager As TextArrayManager) As TextArrayManager
-    ' 新しい TextArrayManager インスタンスを作成
+' TextArrayManager型で、一致したテキストを削除するメソッド
+Public Sub RemoveMatchingText(ByVal target As TextArrayManager) As TextArrayManager
     Dim newManager As New TextArrayManager
-    ' 変数定義
-    Dim i As Long
-    Dim resultLines As String
-    resultLines = ""
+    Dim result As String
+    Dim targetText As String
+    Dim pos As Long
 
-    ' currentLines と targetLines を直接取得して使用
-    For i = LBound(Me.GetLinesArray()) To UBound(Me.GetLinesArray())
-        ' i 番目から targetManager の行数分切り出して完全一致を確認
-        If i + UBound(targetManager.GetLinesArray()) <= UBound(Me.GetLinesArray()) Then
-            ' currentLines の i 番目から targetLines の長さだけ切り出し
-            If Me.GetLinesSubArray(i, i + UBound(targetManager.GetLinesArray())).IsEqual(targetManager) Then
-                ' 一致する場合はその部分を削除
-                i = i + UBound(targetManager.GetLinesArray()) ' targetLines と一致した部分をスキップ
-            Else
-                ' 一致しない場合はその行を結果に追加
-                If resultLines <> "" Then resultLines = resultLines & vbCrLf ' 改行を追加
-                resultLines = resultLines & Me.GetLinesArray()(i)
-            End If
-        Else
-            ' もし切り出しの範囲が無効（最後の部分が切り取れない場合）はそのまま追加
-            If resultLines <> "" Then resultLines = resultLines & vbCrLf ' 改行を追加
-            resultLines = resultLines & Me.GetLinesArray()(i)
-        End If
-    Next i
-    
-    ' 結果を新しい TextArrayManager にセット
-    newManager.SetOriginalText resultLines
-    
-    ' 新しい TextArrayManager を返す
-    Set RemoveMatchingLines = newManager
-End Function
+    ' targetオブジェクトからテキストを取得
+    targetText = target.GetOriginalText()
 
-' 
-' TextArrayManager の GetLinesSubArray メソッドを修正
-Public Function GetLinesSubArray(ByVal startIdx As Long, ByVal endIdx As Long) As TextArrayManager
-    ' 新しい TextArrayManager インスタンスを作成
-    Dim subManager As New TextArrayManager
-    Dim i As Long
-    Dim subLines As String
+    ' 最初の一致位置を検索
+    pos = InStr(OriginalArray, targetText)
     
-    ' 範囲が有効か確認
-    If startIdx < 0 Or endIdx > UBound(Me.GetLinesArray()) Then
-        ' 無効な範囲の場合、Nothing を返して処理を中止
-        Set GetLinesSubArray = Nothing
-        Exit Function
+    ' 最初に一致した部分だけ置換
+    If pos > 0 Then
+        result = Left(OriginalArray, pos - 1) & Mid(OriginalArray, pos + Len(targetText))
     End If
+
+    ' 新しいTextArrayManagerインスタンスに結果をセット
+    newManager.SetOriginalText result
     
-    ' 範囲が有効な場合、その範囲の行を取得
-    For i = startIdx To endIdx
-        subLines = subLines & Me.GetLinesArray()(i) & vbCrLf ' 行を追加
-    Next i
-    
-    ' 取得したサブ行を新しい TextArrayManager にセット
-    subManager.SetOriginalText subLines
-    
-    ' 新しい TextArrayManager を返す
-    Set GetLinesSubArray = subManager
+    ' 新しいTextArrayManagerインスタンスを返す
+    Set RemoveMatchingText = newManager
 End Function
