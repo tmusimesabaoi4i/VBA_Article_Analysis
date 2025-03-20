@@ -82,10 +82,10 @@
 元のテキスト（OriginalArray）を取得します。
 戻り値: String
 - **使用例**:
-  ```vba
-Dim text As String
-text = manager.GetOriginalText()
-Debug.Print text
+    ```vba
+        Dim text As String
+        text = manager.GetOriginalText()
+        Debug.Print text
     ```
 
 ### 3. GetLinesArray() As Variant
@@ -93,10 +93,10 @@ Debug.Print text
 改行で分割された文字列の配列（LinesArray）を取得します。
 戻り値: Variant (文字列配列)
 - **使用例**:
-  ```vba
-Dim lines As Variant
-lines = manager.GetLinesArray()
-Debug.Print lines(0)  ' 最初の行を表示
+    ```vba
+        Dim lines As Variant
+        lines = manager.GetLinesArray()
+        Debug.Print lines(0)  ' 最初の行を表示
     ```
 
 ### 4. GetLineCount() As Long
@@ -104,10 +104,10 @@ Debug.Print lines(0)  ' 最初の行を表示
 テキストの行数を取得します。
 戻り値: Long
 - **使用例**:
-  ```vba
-Dim count As Long
-count = manager.GetLineCount()
-Debug.Print "行数: " & count
+    ```vba
+        Dim count As Long
+        count = manager.GetLineCount()
+        Debug.Print "行数: " & count
     ```
 
 ### 5. RemoveNewlines() As TextArrayManager
@@ -115,10 +115,10 @@ Debug.Print "行数: " & count
 テキストから改行コードを削除し、改行なしの新しい TextArrayManager インスタンスを返します。
 戻り値: TextArrayManager
 - **使用例**:
-  ```vba
-Dim newManager As TextArrayManager
-Set newManager = manager.RemoveNewlines()
-Debug.Print newManager.GetOriginalText()
+    ```vba
+        Dim newManager As TextArrayManager
+        Set newManager = manager.RemoveNewlines()
+        Debug.Print newManager.GetOriginalText()
     ```
 
 ### 6. CopyFrom(ByVal sourceManager As TextArrayManager)
@@ -127,20 +127,20 @@ Debug.Print newManager.GetOriginalText()
 - **パラメータ**:
 sourceManager (TextArrayManager): コピー元のインスタンス
 - **使用例**:
-  ```vba
-Dim manager1 As New TextArrayManager
-Dim manager2 As New TextArrayManager
-manager1.SetOriginalText "サンプルテキスト"
-manager2.CopyFrom manager1
+    ```vba
+        Dim manager1 As New TextArrayManager
+        Dim manager2 As New TextArrayManager
+        manager1.SetOriginalText "サンプルテキスト"
+        manager2.CopyFrom manager1
     ```
 
 ### 7. RemoveSpacesAndTabs()
 - **目的**:  
 テキスト内の半角・全角スペース、タブ、垂直タブを削除し、改めて LinesArray と LineCount を更新します。
 - **使用例**:
-  ```vba
-manager.RemoveSpacesAndTabs()
-Debug.Print manager.GetOriginalText()
+    ```vba
+        manager.RemoveSpacesAndTabs()
+        Debug.Print manager.GetOriginalText()
     ```
 
 ### 8. ConvertToHalfWidth()
@@ -148,10 +148,11 @@ Debug.Print manager.GetOriginalText()
 文字列内の全角文字を半角に変換し、LinesArray と LineCount を更新します。
 ※ 内部では StrConv 関数を使用します。
 - **使用例**:
-  ```vba
-manager.ConvertToHalfWidth()
-Debug.Print manager.GetOriginalText()
+    ```vba
+        manager.ConvertToHalfWidth()
+        Debug.Print manager.GetOriginalText()
     ```
+
 ### 9. ExtractLines(ByVal target As String) As TextArrayManager
 - **目的**:  
 各行の先頭が指定した文字列 (target) と一致する行だけを抽出し、新しい TextArrayManager インスタンスとして返します。
@@ -159,11 +160,12 @@ Debug.Print manager.GetOriginalText()
 target (String): 抽出対象の行の先頭文字列
 戻り値: TextArrayManager
 - **使用例**:
-  ```vba
-Dim extractedManager As TextArrayManager
-Set extractedManager = manager.ExtractLines("特定の行")
-Debug.Print extractedManager.GetOriginalText()
+    ```vba
+        Dim extractedManager As TextArrayManager
+        Set extractedManager = manager.ExtractLines("特定の行")
+        Debug.Print extractedManager.GetOriginalText()
     ```
+
 ### 10. ExtractTextBetweenTargets(ByVal targetStart As String, ByVal targetEnd As String) As TextArrayManager
 - **目的**:  
 指定された開始文字列 (targetStart) と終了文字列 (targetEnd) の間にある行を抽出し、新しい TextArrayManager インスタンスとして返します。
@@ -173,11 +175,12 @@ targetStart (String): 抽出開始の目印となる文字列
 targetEnd (String): 抽出終了の目印となる文字列
 戻り値: TextArrayManager
 - **使用例**:
-  ```vba
-Dim betweenManager As TextArrayManager
-Set betweenManager = manager.ExtractTextBetweenTargets("開始ターゲット", "終了ターゲット")
-Debug.Print betweenManager.GetOriginalText()
+    ```vba
+        Dim betweenManager As TextArrayManager
+        Set betweenManager = manager.ExtractTextBetweenTargets("開始ターゲット", "終了ターゲット")
+        Debug.Print betweenManager.GetOriginalText()
     ```
+
 ### 11. RemoveLineByExactMatch(ByVal target As String) As TextArrayManager
 - **目的**:  
 テキスト内で指定した文字列と完全一致する行を削除し、新しい TextArrayManager インスタンスとして返します。
@@ -186,11 +189,12 @@ Debug.Print betweenManager.GetOriginalText()
 target (String): 削除対象の行と完全一致する文字列
 戻り値: TextArrayManager
 - **使用例**:
-  ```vba
-Dim filteredManager As TextArrayManager
-Set filteredManager = manager.RemoveLineByExactMatch("削除したい行です。")
-Debug.Print filteredManager.GetOriginalText()
+    ```vba
+        Dim filteredManager As TextArrayManager
+        Set filteredManager = manager.RemoveLineByExactMatch("削除したい行です。")
+        Debug.Print filteredManager.GetOriginalText()
     ```
+
 ### 12. IsEqual(ByVal otherManager As TextArrayManager) As Boolean
 - **目的**:  
 他の TextArrayManager インスタンスと、元のテキスト (OriginalArray) および各行 (LinesArray) が一致するかを判定します。
@@ -199,11 +203,12 @@ otherManager (TextArrayManager): 比較対象のインスタンス
 戻り値: Boolean
 一致すれば True、そうでなければ False
 - **使用例**:
-  ```vba
-Dim result As Boolean
-result = manager.IsEqual(anotherManager)
-Debug.Print "一致: " & result
+    ```vba
+        Dim result As Boolean
+        result = manager.IsEqual(anotherManager)
+        Debug.Print "一致: " & result
     ```
+
 ### 13. RemoveMatchingText(ByVal target As TextArrayManager) As TextArrayManager
 - **目的**:  
 引数で指定された TextArrayManager インスタンスのテキストと一致する部分を、元のテキストから削除し、削除後の新しい TextArrayManager インスタンスを返します。
@@ -212,11 +217,12 @@ Debug.Print "一致: " & result
 target (TextArrayManager): 削除対象のテキストを保持するインスタンス
 戻り値: TextArrayManager
 - **使用例**:
-  ```vba
-    Dim reducedManager As TextArrayManager
-    Set reducedManager = manager.RemoveMatchingText(targetManager)
-    Debug.Print reducedManager.GetOriginalText()
+    ```vba
+        Dim reducedManager As TextArrayManager
+        Set reducedManager = manager.RemoveMatchingText(targetManager)
+        Debug.Print reducedManager.GetOriginalText()
     ```
+    
 ### 使用例（サンプルコード）
 以下は、各メソッドの利用例として参考にしてください。
   ```vba
