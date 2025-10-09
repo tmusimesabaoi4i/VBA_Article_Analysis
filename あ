@@ -1,0 +1,216 @@
+Option Explicit
+
+' ==== メイン ====
+Sub DownloadAndCombineToWord()
+    Dim ws As Worksheet
+    Dim baseFolder As String, mainFolder As String
+    Dim fileURL As String, docNum As String, ver As String
+    Dim row As Long, lastRow As Long
+    Dim subFolder As String, filePath As String
+    Dim combinedWord As String, htmlPath As String
+    
+    Dim WordApp As Object, CombineDoc As Object
+    Dim tempText As String
+    
+    ' === 初期設定 ===
+    Set ws = ThisWorkbook.Sheets(1)
+    baseFolder = Replace(Environ("USERPROFILE"), "C:", "E:") & "\Downloads\"
+    mainFolder = baseFolder & ws.Range("A1").Value
+    If Dir(mainFolder, vbDirectory) = "" Then MkDir mainFolder
+    
+    lastRow = ws.Cells(ws.Rows.Count, "C").End(xlUp).Row
+    
+    Debug.Print "===== ダウンロード＆抽出開始 ====="
+    Debug.Print "全ファイル数: " & (lastRow - 1)
+    
+    ' === Word起動 ===
+    Set WordApp = CreateObject("Word.Application")
+    WordApp.Visible = False
+    Set CombineDoc = WordApp.Documents.Add
+    
+    Dim processedCount As Long
+    processedCount = 0
+    
+    ' === ループ（上から順番） ===
+    For row = 2 To lastRow
+        docNum = Trim(ws.Cells(row, "C").Value)
+        ver = Trim(ws.Cells(row, "D").Value)
+        fileURL = GetHyperlinkAddress(ws.Cells(row, "I"))
+        
+        If docNum <> "" And ver <> "" And fileURL <> "" Then
+            processedCount = processedCount + 1
+            
+            ' === 通し番号を3桁で付与 ===
+            Dim idxStr As String
+            idxStr = Format(processedCount, "000")
+            
+            ' === フォルダ作成 ===
+            subFolder = mainFolder & "\" & idxStr & "_" & docNum & "_r" & ver
+            If Dir(subFolder, vbDirectory) = "" Then MkDir subFolder
+            
+            ' === URLからファイル名を取得し、先頭に通し番号を付ける ===
+            Dim fileName As String
+            fileName = Mid(fileURL, InStrRev(fileURL, "/") + 1)
+            fileName = idxStr & "_" & fileName
+            
+            filePath = subFolder & "\" & fileName
+            
+            ' === 進捗表示 ===
+            Debug.Print "▶ (" & processedCount & "/" & (lastRow - 1) & ") ダウンロード中: " & fileName
+            
+            ' === ダウンロード ===
+            DownloadFile fileURL, filePath, "", 30, 5
+            
+            ' === 拡張子判定 ===
+            Dim ext As String
+            ext = LCase(Mid(fileName, InStrRev(fileName, ".") + 1))
+            
+            ' === 見出し追加 ===
+            CombineDoc.Paragraphs.Add
+            CombineDoc.Paragraphs.Last.Range.Text = _
+                "===== [" & idxStr & "] " & docNum & "_r" & ver & " (" & fileName & ") =====" & vbCrLf
+            
+            ' === 抽出処理 ===
+            Select Case ext
+                Case "doc", "docx"
+                    tempText = ExtractFromWord(filePath)
+                    CombineDoc.Paragraphs.Add
+                    CombineDoc.Paragraphs.Last.Range.Text = tempText & vbCrLf
+                
+                Case "ppt", "pptx"
+                    tempText = ExtractFromPowerPoint(filePath)
+                    CombineDoc.Paragraphs.Add
+                    CombineDoc.Paragraphs.Last.Range.Text = tempText & vbCrLf
+                
+                Case Else
+                    CombineDoc.Paragraphs.Add
+                    CombineDoc.Paragraphs.Last.Range.Text = "⚠ 未対応ファイル形式: " & ext & vbCrLf
+            End Select
+        End If
+    Next row
+    
+    ' === 結合Word保存 ===
+    combinedWord = mainFolder & "\combine_" & ws.Range("A1").Value & ".docx"
+    CombineDoc.SaveAs2 combinedWord
+    Debug.Print "✅ Word結合完了: " & combinedWord
+    
+    ' === HTML変換 ===
+    htmlPath = mainFolder & "\combine_" & ws.Range("A1").Value & ".html"
+    CombineDoc.SaveAs2 htmlPath, 8  ' 8 = wdFormatFilteredHTML
+    Debug.Print "✅ HTML出力完了: " & htmlPath
+    
+    CombineDoc.Close False
+    WordApp.Quit
+    Debug.Print "===== 全処理完了 (" & processedCount & " 件) ====="
+End Sub
+
+
+' ==== ダウンロード関数 ====
+Function DownloadFile(URL As String, SavePath As String, Optional Proxy As String = "", Optional Timeout As Long = 30, Optional Retry As Integer = 5)
+    Dim xmlhttp As Object, adoStream As Object
+    Dim attempt As Integer, success As Boolean
+    
+    success = False
+    For attempt = 1 To Retry
+        Debug.Print "   通信中... (" & attempt & "/" & Retry & ")"
+        Set xmlhttp = CreateObject("MSXML2.XMLHTTP")
+        On Error Resume Next
+        xmlhttp.Open "GET", URL, False
+        xmlhttp.setTimeouts 0, Timeout * 1000, Timeout * 1000, Timeout * 1000
+        xmlhttp.Send
+        On Error GoTo 0
+        
+        If xmlhttp.Status = 200 Then
+            Set adoStream = CreateObject("ADODB.Stream")
+            adoStream.Type = 1
+            adoStream.Open
+            adoStream.Write xmlhttp.responseBody
+            adoStream.SaveToFile SavePath, 2
+            adoStream.Close
+            success = True
+            Debug.Print "   ✅ ダウンロード成功 (" & SavePath & ")"
+            Exit For
+        Else
+            Debug.Print "   ⚠ HTTPエラー " & xmlhttp.Status & "、リトライ中..."
+            Application.Wait (Now + TimeValue("0:00:02"))
+        End If
+    Next attempt
+    
+    If Not success Then
+        Debug.Print "   ❌ ダウンロード失敗: " & URL
+    End If
+End Function
+
+
+' ==== ハイパーリンク取得 ====
+Function GetHyperlinkAddress(rng As Range) As String
+    On Error Resume Next
+    GetHyperlinkAddress = rng.Hyperlinks(1).Address
+    On Error GoTo 0
+End Function
+
+
+' ==== Wordファイルから本文・表・図を抽出 ====
+Function ExtractFromWord(filePath As String) As String
+    Dim wdApp As Object, doc As Object, para As Object, tbl As Object, shp As Object
+    Dim textOut As String
+    On Error GoTo ErrHandler
+    
+    Set wdApp = CreateObject("Word.Application")
+    wdApp.Visible = False
+    Set doc = wdApp.Documents.Open(filePath, ReadOnly:=True)
+    
+    textOut = ""
+    For Each para In doc.Paragraphs
+        textOut = textOut & para.Range.Text
+    Next para
+    
+    For Each tbl In doc.Tables
+        textOut = textOut & vbCrLf & "[表]" & vbCrLf & tbl.Range.Text & vbCrLf
+    Next tbl
+    
+    For Each shp In doc.InlineShapes
+        textOut = textOut & vbCrLf & "[画像あり]" & vbCrLf
+    Next shp
+    
+    doc.Close False
+    wdApp.Quit
+    ExtractFromWord = textOut
+    Exit Function
+
+ErrHandler:
+    ExtractFromWord = "⚠ Word抽出失敗: " & Err.Description
+End Function
+
+
+' ==== PowerPointからタイトル・本文・図を抽出 ====
+Function ExtractFromPowerPoint(filePath As String) As String
+    Dim ppApp As Object, pres As Object, sld As Object, shp As Object
+    Dim outText As String
+    On Error GoTo ErrHandler
+    
+    Set ppApp = CreateObject("PowerPoint.Application")
+    ppApp.Visible = False
+    Set pres = ppApp.Presentations.Open(filePath, WithWindow:=msoFalse)
+    
+    For Each sld In pres.Slides
+        outText = outText & vbCrLf & "[Slide " & sld.SlideIndex & "]" & vbCrLf
+        For Each shp In sld.Shapes
+            If shp.HasTextFrame Then
+                If shp.TextFrame.HasText Then
+                    outText = outText & shp.TextFrame.TextRange.Text & vbCrLf
+                End If
+            ElseIf shp.Type = 13 Then ' msoPicture
+                outText = outText & "[画像あり]" & vbCrLf
+            End If
+        Next shp
+    Next sld
+    
+    pres.Close
+    ppApp.Quit
+    ExtractFromPowerPoint = outText
+    Exit Function
+
+ErrHandler:
+    ExtractFromPowerPoint = "⚠ PPT抽出失敗: " & Err.Description
+End Function
