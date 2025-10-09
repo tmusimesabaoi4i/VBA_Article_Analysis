@@ -1,6 +1,6 @@
 Option Explicit
 
-' ==== メイン ====
+'==================== メイン ====================
 Sub DownloadAndCombineToWord()
     Dim ws As Worksheet
     Dim baseFolder As String, mainFolder As String
@@ -8,11 +8,9 @@ Sub DownloadAndCombineToWord()
     Dim row As Long, lastRow As Long
     Dim subFolder As String, filePath As String
     Dim combinedWord As String, htmlPath As String
-    
     Dim WordApp As Object, CombineDoc As Object
-    Dim tempText As String
+    Dim processedCount As Long
     
-    ' === 初期設定 ===
     Set ws = ThisWorkbook.Sheets(1)
     baseFolder = Replace(Environ("USERPROFILE"), "C:", "E:") & "\Downloads\"
     mainFolder = baseFolder & ws.Range("A1").Value
@@ -23,80 +21,61 @@ Sub DownloadAndCombineToWord()
     Debug.Print "===== ダウンロード＆抽出開始 ====="
     Debug.Print "全ファイル数: " & (lastRow - 1)
     
-    ' === Word起動 ===
+    ' Word起動（非表示）
     Set WordApp = CreateObject("Word.Application")
     WordApp.Visible = False
     Set CombineDoc = WordApp.Documents.Add
     
-    Dim processedCount As Long
     processedCount = 0
     
-    ' === ループ（上から順番） ===
+    Dim idxStr As String, fileName As String, ext As String
+    
     For row = 2 To lastRow
         docNum = Trim(ws.Cells(row, "C").Value)
         ver = Trim(ws.Cells(row, "D").Value)
         fileURL = GetHyperlinkAddress(ws.Cells(row, "I"))
+        If docNum = "" Or ver = "" Or fileURL = "" Then GoTo ContinueNext
         
-        If docNum <> "" And ver <> "" And fileURL <> "" Then
-            processedCount = processedCount + 1
-            
-            ' === 通し番号を3桁で付与 ===
-            Dim idxStr As String
-            idxStr = Format(processedCount, "000")
-            
-            ' === フォルダ作成 ===
-            subFolder = mainFolder & "\" & idxStr & "_" & docNum & "_r" & ver
-            If Dir(subFolder, vbDirectory) = "" Then MkDir subFolder
-            
-            ' === URLからファイル名を取得し、先頭に通し番号を付ける ===
-            Dim fileName As String
-            fileName = Mid(fileURL, InStrRev(fileURL, "/") + 1)
-            fileName = idxStr & "_" & fileName
-            
-            filePath = subFolder & "\" & fileName
-            
-            ' === 進捗表示 ===
-            Debug.Print "▶ (" & processedCount & "/" & (lastRow - 1) & ") ダウンロード中: " & fileName
-            
-            ' === ダウンロード ===
-            DownloadFile fileURL, filePath, "", 30, 5
-            
-            ' === 拡張子判定 ===
-            Dim ext As String
-            ext = LCase(Mid(fileName, InStrRev(fileName, ".") + 1))
-            
-            ' === 見出し追加 ===
-            CombineDoc.Paragraphs.Add
-            CombineDoc.Paragraphs.Last.Range.Text = _
-                "===== [" & idxStr & "] " & docNum & "_r" & ver & " (" & fileName & ") =====" & vbCrLf
-            
-            ' === 抽出処理 ===
-            Select Case ext
-                Case "doc", "docx"
-                    tempText = ExtractFromWord(filePath)
-                    CombineDoc.Paragraphs.Add
-                    CombineDoc.Paragraphs.Last.Range.Text = tempText & vbCrLf
-                
-                Case "ppt", "pptx"
-                    tempText = ExtractFromPowerPoint(filePath)
-                    CombineDoc.Paragraphs.Add
-                    CombineDoc.Paragraphs.Last.Range.Text = tempText & vbCrLf
-                
-                Case Else
-                    CombineDoc.Paragraphs.Add
-                    CombineDoc.Paragraphs.Last.Range.Text = "⚠ 未対応ファイル形式: " & ext & vbCrLf
-            End Select
-        End If
+        processedCount = processedCount + 1
+        idxStr = Format(processedCount, "000")
+        
+        subFolder = mainFolder & "\" & idxStr & "_" & docNum & "_r" & ver
+        If Dir(subFolder, vbDirectory) = "" Then MkDir subFolder
+        
+        fileName = Mid(fileURL, InStrRev(fileURL, "/") + 1)
+        fileName = idxStr & "_" & fileName
+        filePath = subFolder & "\" & fileName
+        
+        Debug.Print "▶ (" & processedCount & "/" & (lastRow - 1) & ") ダウンロード中: " & fileName
+        DownloadFile fileURL, filePath, "", 30, 5
+        
+        ext = LCase(Mid(fileName, InStrRev(fileName, ".") + 1))
+        
+        ' 見出し（文献ごと）
+        AppendTextToWord CombineDoc, _
+            "===== [" & idxStr & "] " & docNum & "_r" & ver & " (" & fileName & ") =====", True
+        
+        Select Case ext
+            Case "doc", "docx"
+                ' Word → Word（内容そのまま貼付）
+                AppendFromWord filePath, CombineDoc
+            Case "ppt", "pptx"
+                ' PowerPoint → Word（タイトル/番号/図/表/本文を整理して貼付）
+                AppendFromPowerPoint filePath, CombineDoc
+            Case Else
+                AppendTextToWord CombineDoc, "⚠ 未対応ファイル形式: " & ext, False
+        End Select
+        
+ContinueNext:
     Next row
     
-    ' === 結合Word保存 ===
+    ' まとめ保存
     combinedWord = mainFolder & "\combine_" & ws.Range("A1").Value & ".docx"
     CombineDoc.SaveAs2 combinedWord
     Debug.Print "✅ Word結合完了: " & combinedWord
     
-    ' === HTML変換 ===
     htmlPath = mainFolder & "\combine_" & ws.Range("A1").Value & ".html"
-    CombineDoc.SaveAs2 htmlPath, 8  ' 8 = wdFormatFilteredHTML
+    CombineDoc.SaveAs2 htmlPath, 8   ' 8 = wdFormatFilteredHTML
     Debug.Print "✅ HTML出力完了: " & htmlPath
     
     CombineDoc.Close False
@@ -105,44 +84,40 @@ Sub DownloadAndCombineToWord()
 End Sub
 
 
-' ==== ダウンロード関数 ====
+'==================== 進捗・ネット取得 ====================
 Function DownloadFile(URL As String, SavePath As String, Optional Proxy As String = "", Optional Timeout As Long = 30, Optional Retry As Integer = 5)
     Dim xmlhttp As Object, adoStream As Object
     Dim attempt As Integer, success As Boolean
-    
     success = False
+    
     For attempt = 1 To Retry
         Debug.Print "   通信中... (" & attempt & "/" & Retry & ")"
         Set xmlhttp = CreateObject("MSXML2.XMLHTTP")
         On Error Resume Next
         xmlhttp.Open "GET", URL, False
+        ' ※Proxy を使う場合は WinHTTP に切替が堅牢ですが、既存ポリシーに合わせ XMLHTTP
         xmlhttp.setTimeouts 0, Timeout * 1000, Timeout * 1000, Timeout * 1000
         xmlhttp.Send
         On Error GoTo 0
         
-        If xmlhttp.Status = 200 Then
+        If xmlhttp.readyState = 4 And xmlhttp.Status = 200 Then
             Set adoStream = CreateObject("ADODB.Stream")
-            adoStream.Type = 1
-            adoStream.Open
+            adoStream.Type = 1: adoStream.Open
             adoStream.Write xmlhttp.responseBody
             adoStream.SaveToFile SavePath, 2
             adoStream.Close
             success = True
-            Debug.Print "   ✅ ダウンロード成功 (" & SavePath & ")"
+            Debug.Print "   ✅ ダウンロード成功 → " & SavePath
             Exit For
         Else
-            Debug.Print "   ⚠ HTTPエラー " & xmlhttp.Status & "、リトライ中..."
-            Application.Wait (Now + TimeValue("0:00:02"))
+            Debug.Print "   ⚠ HTTP " & IIf(xmlhttp.readyState = 4, xmlhttp.Status, -1) & "（リトライ）"
+            Application.Wait Now + TimeValue("0:00:02")
         End If
     Next attempt
     
-    If Not success Then
-        Debug.Print "   ❌ ダウンロード失敗: " & URL
-    End If
+    If Not success Then Debug.Print "   ❌ ダウンロード失敗: " & URL
 End Function
 
-
-' ==== ハイパーリンク取得 ====
 Function GetHyperlinkAddress(rng As Range) As String
     On Error Resume Next
     GetHyperlinkAddress = rng.Hyperlinks(1).Address
@@ -150,67 +125,224 @@ Function GetHyperlinkAddress(rng As Range) As String
 End Function
 
 
-' ==== Wordファイルから本文・表・図を抽出 ====
-Function ExtractFromWord(filePath As String) As String
-    Dim wdApp As Object, doc As Object, para As Object, tbl As Object, shp As Object
-    Dim textOut As String
+'==================== Word → Word（中身そのまま貼付） ====================
+Private Sub AppendFromWord(srcPath As String, dstDoc As Object)
     On Error GoTo ErrHandler
+    Dim srcApp As Object, srcDoc As Object, rng As Object
     
-    Set wdApp = CreateObject("Word.Application")
-    wdApp.Visible = False
-    Set doc = wdApp.Documents.Open(filePath, ReadOnly:=True)
+    Set srcApp = CreateObject("Word.Application")
+    srcApp.Visible = False
+    Set srcDoc = srcApp.Documents.Open(srcPath, ReadOnly:=True)
     
-    textOut = ""
-    For Each para In doc.Paragraphs
-        textOut = textOut & para.Range.Text
-    Next para
+    ' そのまま全コンテンツをコピー＆貼付（表・図・書式を保持）
+    srcDoc.Content.Copy
+    Set rng = dstDoc.Content
+    rng.Collapse 0   ' wdCollapseEnd = 0
+    rng.Paste
     
-    For Each tbl In doc.Tables
-        textOut = textOut & vbCrLf & "[表]" & vbCrLf & tbl.Range.Text & vbCrLf
-    Next tbl
+    ' 区切り
+    AppendTextToWord dstDoc, "", False
     
-    For Each shp In doc.InlineShapes
-        textOut = textOut & vbCrLf & "[画像あり]" & vbCrLf
-    Next shp
-    
-    doc.Close False
-    wdApp.Quit
-    ExtractFromWord = textOut
-    Exit Function
-
+    srcDoc.Close False
+    srcApp.Quit
+    Exit Sub
 ErrHandler:
-    ExtractFromWord = "⚠ Word抽出失敗: " & Err.Description
-End Function
+    AppendTextToWord dstDoc, "⚠ Word抽出失敗: " & Err.Description, False
+    On Error Resume Next
+    If Not srcDoc Is Nothing Then srcDoc.Close False
+    If Not srcApp Is Nothing Then srcApp.Quit
+End Sub
 
 
-' ==== PowerPointからタイトル・本文・図を抽出 ====
-Function ExtractFromPowerPoint(filePath As String) As String
-    Dim ppApp As Object, pres As Object, sld As Object, shp As Object
-    Dim outText As String
+'==================== PowerPoint → Word（整理して実物貼付） ====================
+Private Sub AppendFromPowerPoint(ppPath As String, dstDoc As Object)
     On Error GoTo ErrHandler
+    Dim ppApp As Object, pres As Object, sld As Object, shp As Object
+    Dim rng As Object, titleText As String, hasTitle As Boolean
     
     Set ppApp = CreateObject("PowerPoint.Application")
-    ppApp.Visible = False
-    Set pres = ppApp.Presentations.Open(filePath, WithWindow:=msoFalse)
+    ' 完全非表示（ウィンドウなし）
+    ppApp.Visible = 0          ' msoFalse
+    ' Open(FileName, ReadOnly, Untitled, WithWindow) をパラメタで指定
+    Set pres = ppApp.Presentations.Open(ppPath, 1, 0, 0)  ' ReadOnly=1, Untitled=0, WithWindow=0
     
     For Each sld In pres.Slides
-        outText = outText & vbCrLf & "[Slide " & sld.SlideIndex & "]" & vbCrLf
+        ' スライド見出し
+        titleText = ""
+        On Error Resume Next
+        hasTitle = False
+        titleText = sld.Shapes.Title.TextFrame.TextRange.Text
+        hasTitle = (Len(Trim(titleText)) > 0)
+        On Error GoTo 0
+        If Not hasTitle Then
+            ' タイトルプレースホルダが無い場合、最上位のテキストを疑似タイトルに
+            titleText = GetFirstTextOnSlide(sld)
+        End If
+        
+        AppendTextToWord dstDoc, _
+            "[Slide " & sld.SlideIndex & "] " & IIf(Trim(titleText) <> "", "「" & Trim(titleText) & "」", "（タイトルなし）"), True
+        
+        ' 図・表・本文の抽出（実物貼付）
         For Each shp In sld.Shapes
-            If shp.HasTextFrame Then
-                If shp.TextFrame.HasText Then
-                    outText = outText & shp.TextFrame.TextRange.Text & vbCrLf
-                End If
-            ElseIf shp.Type = 13 Then ' msoPicture
-                outText = outText & "[画像あり]" & vbCrLf
+            If IsGroup(shp) Then
+                ' グループはそのまま貼付（図/表混在考慮）
+                shp.Copy
+                PasteToEnd dstDoc
+                AppendTextToWord dstDoc, "", False
+            ElseIf HasTableSafe(shp) Then
+                AppendTextToWord dstDoc, "〔表〕", False
+                shp.Copy
+                PasteToEnd dstDoc
+                AppendTextToWord dstDoc, "", False
+            ElseIf IsPictureLike(shp) Then
+                AppendTextToWord dstDoc, "〔図〕", False
+                shp.Copy
+                PasteToEnd dstDoc
+                AppendTextToWord dstDoc, "", False
+            ElseIf HasChartSafe(shp) Then
+                AppendTextToWord dstDoc, "〔図（グラフ）〕", False
+                shp.Copy
+                PasteToEnd dstDoc
+                AppendTextToWord dstDoc, "", False
+            ElseIf HasTextSafe(shp) Then
+                AppendTextToWord dstDoc, CleanCRLF(shp.TextFrame.TextRange.Text), False
             End If
         Next shp
+        
+        ' スライド間区切り
+        AppendTextToWord dstDoc, String(12, "-"), False
     Next sld
     
     pres.Close
     ppApp.Quit
-    ExtractFromPowerPoint = outText
-    Exit Function
+    Exit Sub
+ErrHandler:
+    AppendTextToWord dstDoc, "⚠ PPT抽出失敗: " & Err.Description, False
+    On Error Resume Next
+    If Not pres Is Nothing Then pres.Close
+    If Not ppApp Is Nothing Then ppApp.Quit
+End Sub
+
+
+'==================== ヘルパー群 ====================
+Private Sub AppendTextToWord(dstDoc As Object, ByVal s As String, Optional ByVal asHeading As Boolean = False)
+    Dim rng As Object
+    Set rng = dstDoc.Content
+    rng.Collapse 0   ' wdCollapseEnd = 0
+    If asHeading Then
+        rng.InsertAfter s & vbCrLf
+        rng.Style = "Heading 2"
+    Else
+        rng.InsertAfter s & vbCrLf
+    End If
+End Sub
+
+Private Sub PasteToEnd(dstDoc As Object)
+    Dim rng As Object
+    Set rng = dstDoc.Content
+    rng.Collapse 0   ' wdCollapseEnd = 0
+    rng.Paste
+End Sub
+
+Private Function HasTextSafe(shp As Object) As Boolean
+    On Error Resume Next
+    HasTextSafe = (shp.HasTextFrame And shp.TextFrame.HasText)
+End Function
+
+Private Function HasTableSafe(shp As Object) As Boolean
+    On Error Resume Next
+    HasTableSafe = shp.HasTable
+End Function
+
+Private Function HasChartSafe(shp As Object) As Boolean
+    On Error Resume Next
+    HasChartSafe = shp.HasChart
+End Function
+
+Private Function IsGroup(shp As Object) As Boolean
+    On Error Resume Next
+    IsGroup = (shp.Type = 6) ' msoGroup = 6
+End Function
+
+Private Function IsPictureLike(shp As Object) As Boolean
+    On Error Resume Next
+    ' msoPicture=13, msoLinkedPicture=11, SmartArtや図形も画像扱いにしたい場合は Type 判定を拡張
+    IsPictureLike = (shp.Type = 13 Or shp.Type = 11)
+End Function
+
+Private Function CleanCRLF(ByVal s As String) As String
+    s = Replace(s, vbCr, vbLf)
+    s = Replace(s, vbLf & vbLf, vbLf)
+    CleanCRLF = s
+End Function
+
+Private Function GetFirstTextOnSlide(sld As Object) As String
+    Dim shp As Object
+    On Error Resume Next
+    For Each shp In sld.Shapes
+        If HasTextSafe(shp) Then
+            GetFirstTextOnSlide = Trim(shp.TextFrame.TextRange.Text)
+            If Len(GetFirstTextOnSlide) > 0 Then Exit Function
+        End If
+    Next shp
+    GetFirstTextOnSlide = ""
+End Function
+
+'==================== Word → Word（表・画像も実物貼付） ====================
+Private Sub AppendFromWord(srcPath As String, dstDoc As Object)
+    On Error GoTo ErrHandler
+    
+    Dim srcApp As Object, srcDoc As Object, rngDst As Object
+    Dim para As Object, tbl As Object, shp As Object
+    Dim tmpRng As Object
+    
+    Set srcApp = CreateObject("Word.Application")
+    srcApp.Visible = False
+    Set srcDoc = srcApp.Documents.Open(srcPath, ReadOnly:=True)
+    
+    ' --- 1. 段落テキストのコピー ---
+    For Each para In srcDoc.Paragraphs
+        If Trim(para.Range.Text) <> "" Then
+            AppendTextToWord dstDoc, para.Range.Text, False
+        End If
+    Next para
+    
+    ' --- 2. 表のコピー（罫線含む実物） ---
+    For Each tbl In srcDoc.Tables
+        AppendTextToWord dstDoc, "〔表〕", False
+        tbl.Range.Copy
+        PasteToEnd dstDoc
+        AppendTextToWord dstDoc, "", False
+    Next tbl
+    
+    ' --- 3. 画像（InlineShape / Shape）貼付 ---
+    For Each shp In srcDoc.InlineShapes
+        AppendTextToWord dstDoc, "〔図〕", False
+        shp.Range.Copy
+        PasteToEnd dstDoc
+        AppendTextToWord dstDoc, "", False
+    Next shp
+    
+    For Each shp In srcDoc.Shapes
+        If shp.Type = 13 Or shp.Type = 11 Then ' msoPicture, msoLinkedPicture
+            AppendTextToWord dstDoc, "〔図〕", False
+            shp.Select
+            srcApp.Selection.Copy
+            PasteToEnd dstDoc
+            AppendTextToWord dstDoc, "", False
+        End If
+    Next shp
+    
+    ' --- 4. 区切り線 ---
+    AppendTextToWord dstDoc, String(12, "-"), False
+    
+    srcDoc.Close False
+    srcApp.Quit
+    Exit Sub
 
 ErrHandler:
-    ExtractFromPowerPoint = "⚠ PPT抽出失敗: " & Err.Description
-End Function
+    AppendTextToWord dstDoc, "⚠ Word抽出失敗: " & Err.Description, False
+    On Error Resume Next
+    If Not srcDoc Is Nothing Then srcDoc.Close False
+    If Not srcApp Is Nothing Then srcApp.Quit
+End Sub
