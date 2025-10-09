@@ -1,61 +1,33 @@
 Option Explicit
 
-Private CancelFlag As Boolean
-
-' ==== プログレスバー更新 ====
-Public Sub UpdateProgress(ByVal current As Long, ByVal total As Long, ByVal statusText As String)
-    With frmProgress
-        Dim pct As Double
-        pct = current / total
-        If pct > 1 Then pct = 1
-        .lblBar.Width = pct * .fraProgress.Width
-        .lblPercent.Caption = Format(pct * 100, "0") & "%"
-        .lblStatus.Caption = statusText
-        DoEvents
-    End With
-End Sub
-
-Public Sub CancelOperation()
-    CancelFlag = True
-End Sub
-
-
-' ==== メイン処理 ====
-Sub DownloadAndCombinePPTX_UI()
+' ==== メイン ====
+Sub DownloadAndCombineToWord()
     Dim ws As Worksheet
     Dim baseFolder As String, mainFolder As String
     Dim fileURL As String, docNum As String, ver As String
     Dim row As Long, lastRow As Long
-    Dim subFolder As String, pptxPath As String
-    Dim combinedPPTX As String, htmlPath As String
-    Dim appPPT As Object, pres As Object
-    Dim combinePres As Object
+    Dim subFolder As String, filePath As String
+    Dim combinedWord As String, htmlPath As String
+    
+    Dim WordApp As Object, CombineDoc As Object
+    Dim tempText As String
     
     Set ws = ThisWorkbook.Sheets(1)
     baseFolder = Replace(Environ("USERPROFILE"), "C:", "E:") & "\Downloads\"
     mainFolder = baseFolder & ws.Range("A1").Value
+    
     If Dir(mainFolder, vbDirectory) = "" Then MkDir mainFolder
     
     lastRow = ws.Cells(ws.Rows.Count, "C").End(xlUp).Row
     
-    ' ==== フォーム起動 ====
-    frmProgress.Show vbModeless
-    CancelFlag = False
-    UpdateProgress 0, lastRow, "初期化中..."
+    Debug.Print "===== ダウンロード＆抽出開始 ====="
     
-    Set appPPT = CreateObject("PowerPoint.Application")
-    appPPT.Visible = True
-    Set combinePres = appPPT.Presentations.Add
-    
-    Dim successCount As Long
-    successCount = 0
+    ' Word起動
+    Set WordApp = CreateObject("Word.Application")
+    WordApp.Visible = False
+    Set CombineDoc = WordApp.Documents.Add
     
     For row = 2 To lastRow
-        If CancelFlag Then
-            frmProgress.lblStatus.Caption = "❌ 中止されました"
-            Exit For
-        End If
-        
         docNum = Trim(ws.Cells(row, "C").Value)
         ver = Trim(ws.Cells(row, "D").Value)
         fileURL = GetHyperlinkAddress(ws.Cells(row, "I"))
@@ -64,49 +36,64 @@ Sub DownloadAndCombinePPTX_UI()
             subFolder = mainFolder & "\" & docNum & "_r" & ver
             If Dir(subFolder, vbDirectory) = "" Then MkDir subFolder
             
-            pptxPath = subFolder & "\" & docNum & "_r" & ver & ".pptx"
-            UpdateProgress row - 1, lastRow, "ダウンロード中: " & docNum
+            ' ファイル名をURLから抽出
+            Dim fileName As String
+            fileName = Mid(fileURL, InStrRev(fileURL, "/") + 1)
+            filePath = subFolder & "\" & fileName
             
-            DownloadFile_UI fileURL, pptxPath, "", 30, 5
+            Debug.Print "▶ ダウンロード中: " & fileName
+            DownloadFile fileURL, filePath, "", 30, 5
             
-            On Error Resume Next
-            Set pres = appPPT.Presentations.Open(pptxPath, , , msoFalse)
-            If Not pres Is Nothing Then
-                pres.Slides.Range.Copy
-                combinePres.Slides.Paste
-                pres.Close
-                successCount = successCount + 1
-            End If
-            On Error GoTo 0
+            ' 抽出
+            Dim ext As String
+            ext = LCase(Mid(fileName, InStrRev(fileName, ".") + 1))
+            
+            CombineDoc.Paragraphs.Add
+            CombineDoc.Paragraphs.Last.Range.Text = _
+                "===== " & docNum & "_r" & ver & " (" & fileName & ") =====" & vbCrLf
+            
+            Select Case ext
+                Case "doc", "docx"
+                    tempText = ExtractFromWord(filePath)
+                    CombineDoc.Paragraphs.Add
+                    CombineDoc.Paragraphs.Last.Range.Text = tempText & vbCrLf
+                
+                Case "ppt", "pptx"
+                    tempText = ExtractFromPowerPoint(filePath)
+                    CombineDoc.Paragraphs.Add
+                    CombineDoc.Paragraphs.Last.Range.Text = tempText & vbCrLf
+                
+                Case Else
+                    CombineDoc.Paragraphs.Add
+                    CombineDoc.Paragraphs.Last.Range.Text = "⚠ 未対応ファイル形式: " & ext & vbCrLf
+            End Select
         End If
     Next row
     
-    combinedPPTX = mainFolder & "\combine_" & ws.Range("A1").Value & ".pptx"
-    combinePres.SaveAs combinedPPTX
+    ' 結合Word保存
+    combinedWord = mainFolder & "\combine_" & ws.Range("A1").Value & ".docx"
+    CombineDoc.SaveAs2 combinedWord
+    Debug.Print "✅ Word結合完了: " & combinedWord
+    
+    ' HTML変換
     htmlPath = mainFolder & "\combine_" & ws.Range("A1").Value & ".html"
-    combinePres.SaveAs htmlPath, 12
+    CombineDoc.SaveAs2 htmlPath, 8  ' 8 = wdFormatFilteredHTML
+    Debug.Print "✅ HTML出力完了: " & htmlPath
     
-    combinePres.Close
-    appPPT.Quit
-    
-    UpdateProgress lastRow, lastRow, "✅ 完了: " & successCount & "件処理しました"
-    MsgBox "完了しました！", vbInformation
-    Unload frmProgress
+    CombineDoc.Close False
+    WordApp.Quit
+    Debug.Print "===== 全処理完了 ====="
 End Sub
 
 
-' ==== ダウンロード関数（UI更新対応） ====
-Sub DownloadFile_UI(URL As String, SavePath As String, Optional Proxy As String = "", Optional Timeout As Long = 30, Optional Retry As Integer = 5)
+' ==== ダウンロード関数 ====
+Function DownloadFile(URL As String, SavePath As String, Optional Proxy As String = "", Optional Timeout As Long = 30, Optional Retry As Integer = 5)
     Dim xmlhttp As Object, adoStream As Object
-    Dim attempt As Integer
-    Dim success As Boolean
+    Dim attempt As Integer, success As Boolean
     
     success = False
     For attempt = 1 To Retry
-        If CancelFlag Then Exit Sub
-        
-        UpdateProgress attempt, Retry, "通信中... (" & attempt & "/" & Retry & ")"
-        
+        Debug.Print "通信中... (" & attempt & "/" & Retry & ")"
         Set xmlhttp = CreateObject("MSXML2.XMLHTTP")
         On Error Resume Next
         xmlhttp.Open "GET", URL, False
@@ -123,19 +110,88 @@ Sub DownloadFile_UI(URL As String, SavePath As String, Optional Proxy As String 
             adoStream.Close
             success = True
             Exit For
+        Else
+            Application.Wait (Now + TimeValue("0:00:02"))
         End If
-        
-        Application.Wait (Now + TimeValue("0:00:01"))
     Next attempt
     
     If Not success Then
-        UpdateProgress Retry, Retry, "❌ 失敗: " & URL
+        Debug.Print "❌ ダウンロード失敗: " & URL
     End If
-End Sub
+End Function
 
 
+' ==== ハイパーリンク取得 ====
 Function GetHyperlinkAddress(rng As Range) As String
     On Error Resume Next
     GetHyperlinkAddress = rng.Hyperlinks(1).Address
     On Error GoTo 0
+End Function
+
+
+' ==== Wordファイルから本文＋表＋図を抽出 ====
+Function ExtractFromWord(filePath As String) As String
+    Dim wdApp As Object, doc As Object, para As Object, tbl As Object, shp As Object
+    Dim textOut As String
+    On Error GoTo ErrHandler
+    
+    Set wdApp = CreateObject("Word.Application")
+    wdApp.Visible = False
+    Set doc = wdApp.Documents.Open(filePath, ReadOnly:=True)
+    
+    textOut = ""
+    For Each para In doc.Paragraphs
+        textOut = textOut & para.Range.Text
+    Next para
+    
+    ' 表の抽出
+    For Each tbl In doc.Tables
+        textOut = textOut & vbCrLf & "[表]" & vbCrLf & tbl.Range.Text & vbCrLf
+    Next tbl
+    
+    ' 図の有無
+    For Each shp In doc.InlineShapes
+        textOut = textOut & vbCrLf & "[画像あり]" & vbCrLf
+    Next shp
+    
+    doc.Close False
+    wdApp.Quit
+    ExtractFromWord = textOut
+    Exit Function
+
+ErrHandler:
+    ExtractFromWord = "⚠ Word抽出失敗: " & Err.Description
+End Function
+
+
+' ==== PowerPointからタイトル・本文・図を抽出 ====
+Function ExtractFromPowerPoint(filePath As String) As String
+    Dim ppApp As Object, pres As Object, sld As Object, shp As Object
+    Dim outText As String
+    On Error GoTo ErrHandler
+    
+    Set ppApp = CreateObject("PowerPoint.Application")
+    ppApp.Visible = False
+    Set pres = ppApp.Presentations.Open(filePath, WithWindow:=msoFalse)
+    
+    For Each sld In pres.Slides
+        outText = outText & vbCrLf & "[Slide " & sld.SlideIndex & "]" & vbCrLf
+        For Each shp In sld.Shapes
+            If shp.HasTextFrame Then
+                If shp.TextFrame.HasText Then
+                    outText = outText & shp.TextFrame.TextRange.Text & vbCrLf
+                End If
+            ElseIf shp.Type = 13 Then ' msoPicture
+                outText = outText & "[画像あり]" & vbCrLf
+            End If
+        Next shp
+    Next sld
+    
+    pres.Close
+    ppApp.Quit
+    ExtractFromPowerPoint = outText
+    Exit Function
+
+ErrHandler:
+    ExtractFromPowerPoint = "⚠ PPT抽出失敗: " & Err.Description
 End Function
