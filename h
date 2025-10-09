@@ -1,122 +1,84 @@
 Option Explicit
 
-' ===== メイン処理 =====
-Sub DownloadAndCombinePPTX()
-    Dim ws As Worksheet
-    Dim baseFolder As String, mainFolder As String
-    Dim fileURL As String, docNum As String, ver As String
-    Dim row As Long, lastRow As Long
-    Dim subFolder As String, pptxPath As String
-    Dim combinedPPTX As String, htmlPath As String
-    Dim appPPT As Object, pres As Object
-    Dim combinePres As Object
+Sub FilterAndSortByKeyword()
+    Dim wsSrc As Worksheet, wsDst As Worksheet
+    Dim lastRow As Long, lastCol As Long
+    Dim i As Long, j As Long, dstRow As Long
+    Dim titleCol As Long
+    Dim keyword As String
+    Dim matchFlag As Boolean
+    Dim cellTitle As String
     
-    Set ws = ThisWorkbook.Sheets(1)
+    ' ===== シート設定 =====
+    Set wsSrc = ThisWorkbook.Sheets("SheetF")   ' ★シート名は必要に応じて変更
+    Set wsDst = ThisWorkbook.Sheets("Sheet2")
+    wsDst.Cells.Clear
     
-    ' --- ✅ USERPROFILE のドライブ文字を E に強制 ---
-    baseFolder = Replace(Environ("USERPROFILE"), "C:", "E:") & "\Downloads\"
+    ' ===== 行・列情報 =====
+    titleCol = 6   ' F列 = タイトル列
+    lastRow = wsSrc.Cells(wsSrc.Rows.Count, titleCol).End(xlUp).Row
+    lastCol = wsSrc.Cells(1, wsSrc.Columns.Count).End(xlToLeft).Column
     
-    mainFolder = baseFolder & ws.Range("A1").Value
-    If Dir(mainFolder, vbDirectory) = "" Then MkDir mainFolder
+    ' ===== キーワード取得（1行目のみ）=====
+    Dim keywords() As String
+    Dim kwCount As Long
+    kwCount = lastCol
+    ReDim keywords(1 To kwCount)
+    For j = 1 To kwCount
+        ' --- 前後空白・改行を除去 ---
+        keywords(j) = CleanKeyword(wsSrc.Cells(1, j).Value)
+    Next j
     
-    lastRow = ws.Cells(ws.Rows.Count, "C").End(xlUp).Row
+    ' ===== 見出し行コピー =====
+    wsSrc.Rows(1).Copy wsDst.Rows(1)
+    dstRow = 2
     
-    Debug.Print "===== ダウンロード開始 ====="
-    
-    ' PowerPoint起動
-    Set appPPT = CreateObject("PowerPoint.Application")
-    appPPT.Visible = True
-    Set combinePres = appPPT.Presentations.Add
-
-    For row = 2 To lastRow
-        docNum = Trim(ws.Cells(row, "C").Value)
-        ver = Trim(ws.Cells(row, "D").Value)
-        fileURL = GetHyperlinkAddress(ws.Cells(row, "I"))
+    ' ===== タイトル抽出ループ（2行目～）=====
+    For i = 2 To lastRow
+        cellTitle = LCase(Trim(wsSrc.Cells(i, titleCol).Value)) ' 小文字化で統一
+        matchFlag = False
         
-        If docNum <> "" And ver <> "" And fileURL <> "" Then
-            subFolder = mainFolder & "\" & docNum & "_r" & ver
-            If Dir(subFolder, vbDirectory) = "" Then MkDir subFolder
-            
-            pptxPath = subFolder & "\" & docNum & "_r" & ver & ".pptx"
-            Debug.Print "▶ ダウンロード中: " & fileURL
-            DownloadFile fileURL, pptxPath, "", 30, 10
-            
-            ' PPTXを結合
-            On Error Resume Next
-            Set pres = appPPT.Presentations.Open(pptxPath, , , msoFalse)
-            If Not pres Is Nothing Then
-                pres.Slides.Range.Copy
-                combinePres.Slides.Paste
-                pres.Close
+        For j = 1 To kwCount
+            If keywords(j) <> "" Then
+                If InStr(1, cellTitle, LCase(keywords(j)), vbTextCompare) > 0 Then
+                    matchFlag = True
+                    Exit For
+                End If
             End If
-            On Error GoTo 0
+        Next j
+        
+        If matchFlag Then
+            wsSrc.Rows(i).Copy wsDst.Rows(dstRow)
+            dstRow = dstRow + 1
         End If
-    Next row
-
-    ' 結合ファイルを保存
-    combinedPPTX = mainFolder & "\combine_" & ws.Range("A1").Value & ".pptx"
-    combinePres.SaveAs combinedPPTX
-    Debug.Print "✅ 結合完了: " & combinedPPTX
-
-    ' HTMLに変換
-    htmlPath = mainFolder & "\combine_" & ws.Range("A1").Value & ".html"
-    combinePres.SaveAs htmlPath, 12 'ppSaveAsHTML = 12
-    Debug.Print "✅ HTML変換完了: " & htmlPath
-
-    combinePres.Close
-    appPPT.Quit
-    Debug.Print "===== 完了しました ====="
+    Next i
+    
+    ' ===== 並べ替え =====
+    Dim sortRange As Range
+    Dim lastRowDst As Long
+    lastRowDst = wsDst.Cells(wsDst.Rows.Count, "C").End(xlUp).Row
+    
+    If lastRowDst < 2 Then
+        MsgBox "該当するタイトルが見つかりませんでした。", vbInformation
+        Exit Sub
+    End If
+    
+    Set sortRange = wsDst.Range("A1").CurrentRegion
+    
+    sortRange.Sort Key1:=wsDst.Range("C2"), Order1:=xlAscending, _
+                   Key2:=wsDst.Range("D2"), Order2:=xlAscending, _
+                   Key3:=wsDst.Range("H2"), Order3:=xlAscending, _
+                   Header:=xlYes
+    
+    MsgBox "抽出と整列が完了しました。", vbInformation
 End Sub
 
 
-' ===== ハイパーリンク取得 =====
-Function GetHyperlinkAddress(rng As Range) As String
-    On Error Resume Next
-    GetHyperlinkAddress = rng.Hyperlinks(1).Address
-    On Error GoTo 0
-End Function
-
-
-' ===== ファイルダウンロード関数 =====
-Function DownloadFile(URL As String, SavePath As String, Optional Proxy As String = "", Optional Timeout As Long = 30, Optional Retry As Integer = 10)
-    Dim xmlhttp As Object
-    Dim adoStream As Object
-    Dim attempt As Integer
-    Dim success As Boolean
-    Dim startTime As Double
-    
-    success = False
-    For attempt = 1 To Retry
-        Debug.Print "通信中... [" & attempt & "回目]"
-        Set xmlhttp = CreateObject("MSXML2.XMLHTTP")
-        startTime = Timer
-        On Error Resume Next
-        xmlhttp.Open "GET", URL, False
-        If Proxy <> "" Then
-            xmlhttp.setProxy 2, Proxy, ""
-        End If
-        xmlhttp.setTimeouts 0, Timeout * 1000, Timeout * 1000, Timeout * 1000
-        xmlhttp.Send
-        On Error GoTo 0
-        
-        If xmlhttp.Status = 200 Then
-            Set adoStream = CreateObject("ADODB.Stream")
-            adoStream.Type = 1
-            adoStream.Open
-            adoStream.Write xmlhttp.responseBody
-            adoStream.SaveToFile SavePath, 2
-            adoStream.Close
-            success = True
-            Debug.Print "✅ ダウンロード成功 (" & Round(Timer - startTime, 1) & "秒)"
-            Exit For
-        Else
-            Debug.Print "⚠️ リトライ中... (HTTP " & xmlhttp.Status & ")"
-            DoEvents
-            Application.Wait (Now + TimeValue("0:00:02"))
-        End If
-    Next attempt
-    
-    If Not success Then
-        Debug.Print "❌ ダウンロード失敗: " & URL
-    End If
+' ===== キーワード整形（空白・改行を除去）=====
+Private Function CleanKeyword(ByVal s As String) As String
+    s = Trim(s)
+    s = Replace(s, vbCr, "")
+    s = Replace(s, vbLf, "")
+    s = Replace(s, "　", "") ' 全角スペース除去
+    CleanKeyword = s
 End Function
