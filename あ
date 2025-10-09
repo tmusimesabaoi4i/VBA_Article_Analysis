@@ -367,3 +367,84 @@ Private Sub PasteToEnd(dstDoc As Object)
     rng.Paste
 End Sub
 
+
+'==================== PowerPoint → Word（表・図・本文すべて実物貼付） ====================
+Private Sub AppendFromPowerPoint(ppPath As String, dstDoc As Object)
+    On Error GoTo ErrHandler
+    Dim ppApp As Object, pres As Object, sld As Object, shp As Object
+    Dim titleText As String, txt As String
+    
+    ' --- PowerPointを非表示ウィンドウで開く ---
+    Set ppApp = CreateObject("PowerPoint.Application")
+    ppApp.Visible = True
+    Set pres = ppApp.Presentations.Open(ppPath, ReadOnly:=True, WithWindow:=msoFalse)
+    
+    For Each sld In pres.Slides
+        ' === スライドタイトル ===
+        On Error Resume Next
+        titleText = ""
+        titleText = sld.Shapes.Title.TextFrame.TextRange.Text
+        If Len(Trim(titleText)) = 0 Then titleText = "(タイトルなし)"
+        On Error GoTo 0
+        AppendTextToWord dstDoc, "[Slide " & sld.SlideIndex & "] 「" & titleText & "」", True
+        
+        ' === スライド内要素を走査 ===
+        For Each shp In sld.Shapes
+            On Error Resume Next
+            
+            ' 表（Table）
+            If shp.HasTable Then
+                AppendTextToWord dstDoc, "〔表〕", False
+                shp.Table.Range.Copy
+                PasteToEnd dstDoc
+                AppendTextToWord dstDoc, "", False
+            
+            ' 画像（Picture / LinkedPicture）
+            ElseIf shp.Type = 13 Or shp.Type = 11 Then
+                AppendTextToWord dstDoc, "〔図〕", False
+                shp.Copy
+                PasteToEnd dstDoc
+                AppendTextToWord dstDoc, "", False
+            
+            ' グラフ（Chart）
+            ElseIf shp.HasChart Then
+                AppendTextToWord dstDoc, "〔図（グラフ）〕", False
+                shp.Copy
+                PasteToEnd dstDoc
+                AppendTextToWord dstDoc, "", False
+            
+            ' SmartArt（図形化オブジェクト）
+            ElseIf shp.Type = 24 Then ' msoSmartArt
+                AppendTextToWord dstDoc, "〔SmartArt〕", False
+                shp.Copy
+                PasteToEnd dstDoc
+                AppendTextToWord dstDoc, "", False
+            
+            ' テキストボックス
+            ElseIf shp.HasTextFrame Then
+                If shp.TextFrame.HasText Then
+                    txt = CleanCRLF(shp.TextFrame.TextRange.Text)
+                    If Len(Trim(txt)) > 0 Then
+                        AppendTextToWord dstDoc, txt, False
+                    End If
+                End If
+            End If
+            
+            On Error GoTo 0
+        Next shp
+        
+        ' スライド区切り線
+        AppendTextToWord dstDoc, String(12, "-"), False
+    Next sld
+    
+    pres.Close
+    ppApp.Quit
+    Exit Sub
+
+ErrHandler:
+    AppendTextToWord dstDoc, "⚠ PPT抽出失敗: " & Err.Description, False
+    On Error Resume Next
+    If Not pres Is Nothing Then pres.Close
+    If Not ppApp Is Nothing Then ppApp.Quit
+End Sub
+
