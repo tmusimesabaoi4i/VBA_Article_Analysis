@@ -346,3 +346,24 @@ ErrHandler:
     If Not srcDoc Is Nothing Then srcDoc.Close False
     If Not srcApp Is Nothing Then srcApp.Quit
 End Sub
+
+'==================== ヘルパー群 ====================
+Private Sub AppendTextToWord(dstDoc As Object, ByVal s As String, Optional ByVal asHeading As Boolean = False)
+    Dim rng As Object
+    Set rng = dstDoc.Content
+    rng.Collapse 0   ' 0 = wdCollapseEnd
+    rng.InsertAfter s & vbCrLf
+    If asHeading Then
+        On Error Resume Next
+        rng.Style = "Heading 2"
+        On Error GoTo 0
+    End If
+End Sub
+
+Private Sub PasteToEnd(dstDoc As Object)
+    Dim rng As Object
+    Set rng = dstDoc.Content
+    rng.Collapse 0   ' 0 = wdCollapseEnd
+    rng.Paste
+End Sub
+
