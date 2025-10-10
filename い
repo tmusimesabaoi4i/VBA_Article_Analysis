@@ -1,0 +1,96 @@
+Option Explicit
+
+Sub ConvertSubfolderDocsToPDF()
+    Dim ws As Worksheet
+    Dim basePath As String
+    Dim fso As Object, folder As Object, subFolder As Object
+    Dim file As Object
+    Dim wordApp As Object, pptApp As Object
+    Dim wordOpened As Boolean, pptOpened As Boolean
+    Dim pdfPath As String
+    Dim targetFile As String
+    Dim ext As String
+    Dim doneCount As Long
+    
+    Set ws = ThisWorkbook.Sheets("Sheet1")
+    basePath = Trim(ws.Range("A1").Value)
+    If basePath = "" Then
+        MsgBox "A1セルにフォルダパスを入力してください。", vbExclamation
+        Exit Sub
+    End If
+    If Right(basePath, 1) <> "\" Then basePath = basePath & "\"
+    
+    On Error Resume Next
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set folder = fso.GetFolder(basePath)
+    On Error GoTo 0
+    If folder Is Nothing Then
+        MsgBox "指定されたフォルダが見つかりません。" & vbCrLf & basePath, vbCritical
+        Exit Sub
+    End If
+    
+    ' Word と PowerPoint のアプリを準備
+    On Error Resume Next
+    Set wordApp = GetObject(, "Word.Application")
+    If wordApp Is Nothing Then
+        Set wordApp = CreateObject("Word.Application")
+        wordOpened = True
+    End If
+    
+    Set pptApp = GetObject(, "PowerPoint.Application")
+    If pptApp Is Nothing Then
+        Set pptApp = CreateObject("PowerPoint.Application")
+        pptOpened = True
+    End If
+    On Error GoTo 0
+    
+    wordApp.Visible = False
+    pptApp.Visible = False
+    
+    ' === サブフォルダごとに処理 ===
+    For Each subFolder In folder.SubFolders
+        targetFile = ""
+        
+        ' --- ファイル探索（Word優先、なければPowerPoint） ---
+        For Each file In subFolder.Files
+            ext = LCase(fso.GetExtensionName(file))
+            If ext = "doc" Or ext = "docx" Or ext = "docm" Then
+                targetFile = file.Path
+                Exit For
+            ElseIf ext = "ppt" Or ext = "pptx" Or ext = "pptm" Then
+                targetFile = file.Path
+                Exit For
+            End If
+        Next file
+        
+        If targetFile <> "" Then
+            pdfPath = basePath & subFolder.Name & ".pdf"
+            ext = LCase(fso.GetExtensionName(targetFile))
+            
+            On Error Resume Next
+            If ext = "doc" Or ext = "docx" Or ext = "docm" Then
+                ' Word ファイルのPDF化
+                Dim wDoc As Object
+                Set wDoc = wordApp.Documents.Open(targetFile, ReadOnly:=True)
+                wDoc.ExportAsFixedFormat OutputFileName:=pdfPath, _
+                    ExportFormat:=17, OpenAfterExport:=False
+                wDoc.Close False
+                doneCount = doneCount + 1
+            ElseIf ext = "ppt" Or ext = "pptx" Or ext = "pptm" Then
+                ' PowerPoint ファイルのPDF化
+                Dim pPres As Object
+                Set pPres = pptApp.Presentations.Open(targetFile, WithWindow:=False)
+                pPres.SaveAs pdfPath, 32 ' 32 = ppSaveAsPDF
+                pPres.Close
+                doneCount = doneCount + 1
+            End If
+            On Error GoTo 0
+        End If
+    Next subFolder
+    
+    ' アプリケーション終了処理
+    If wordOpened Then wordApp.Quit
+    If pptOpened Then pptApp.Quit
+    
+    MsgBox "PDF化完了: " & doneCount & " 件生成しました。", vbInformation
+End Sub
