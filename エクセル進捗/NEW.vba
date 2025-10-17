@@ -101,23 +101,131 @@ End Sub
 '===========================================================
 ' 📈 データバー適用（安全版）
 '===========================================================
+'====================================
+' データバー適用（安全版：自動フォールバック付き）
+'====================================
 Sub ApplyDataBar(rng As Range)
-    On Error GoTo Fallback
+    Dim lastRow As Long
+    On Error Resume Next
+    lastRow = rng.Parent.Cells(rng.Parent.Rows.Count, rng.Column).End(xlUp).Row
+    On Error GoTo 0
+    If lastRow < 2 Then Exit Sub   ' データなし
+
+    ' 範囲が逆転していないか（F2:F1 など）
+    If rng.Row > rng.Rows(rng.Rows.Count).Row Then Exit Sub
+
+    ' 既存CF削除
     rng.FormatConditions.Delete
-    Dim db As DataBar
-    Set db = rng.FormatConditions.AddDatabar
-    With db
-        .MinPoint.Modify Type:=xlConditionValueNumber, Value:=0
-        .MaxPoint.Modify Type:=xlConditionValueNumber, Value:=1
-        .BarFillType = xlDataBarFillSolid
-        .BarColor.Color = RGB(91, 155, 213)
-        .ShowValue = True
+
+    ' データバー対応判定：バージョン & ファイル形式
+    If SupportsDataBars() Then
+        Dim db As DataBar
+        On Error Resume Next
+        Set db = rng.FormatConditions.AddDatabar
+        If Err.Number <> 0 Or db Is Nothing Then
+            Err.Clear
+            On Error GoTo 0
+            ' フォールバック
+            ApplyColorScaleFallback rng
+            Exit Sub
+        End If
+        On Error GoTo 0
+
+        With db
+            .MinPoint.Modify Type:=xlConditionValueNumber, Value:=0
+            .MaxPoint.Modify Type:=xlConditionValueNumber, Value:=1
+            .BarFillType = xlDataBarFillSolid
+            .BarColor.Color = RGB(91, 155, 213)
+            .AxisPosition = xlDataBarAxisAutomatic
+            .ShowValue = True
+        End With
+
+        ' 進捗率用の表示形式（任意）
+        On Error Resume Next
+        rng.NumberFormatLocal = "0%"
+        On Error GoTo 0
+    Else
+        ' フォールバック
+        ApplyColorScaleFallback rng
+    End If
+End Sub
+
+'====================================
+' データバー対応可否判定
+' - Excel 2007以降 & xlsx/xlsm 等の新形式なら True
+'====================================
+Function SupportsDataBars() As Boolean
+    Dim ver As Double
+    Dim ff As Long
+    On Error Resume Next
+    ver = CDbl(Application.Version)        ' 12=2007, 14=2010, ...
+    ff = ThisWorkbook.FileFormat
+    On Error GoTo 0
+
+    If ver >= 12 Then
+        ' 互換モード（xls=xlExcel8）は不可
+        If ff <> xlExcel8 And ff <> xlExcel4Workbook Then
+            SupportsDataBars = True
+            Exit Function
+        End If
+    End If
+    SupportsDataBars = False
+End Function
+
+'====================================
+' フォールバック1：2色カラー スケール（下限→上限）
+' データバー不可時の代替（Excel 2007 以降）
+'====================================
+Sub ApplyColorScaleFallback(rng As Range)
+    On Error GoTo HardFallback
+
+    Dim cs As ColorScale
+    ' 既存CFを消してから実施（冪等性確保）
+    rng.FormatConditions.Delete
+
+    ' 2色スケール：0（赤）→ 1（緑）
+    Set cs = rng.FormatConditions.AddColorScale(ColorScaleType:=2)
+    With cs.ColorScaleCriteria(1)
+        .Type = xlConditionValueNumber
+        .Value = 0
+        .FormatColor.Color = RGB(255, 99, 71)      ' 赤
     End With
+    With cs.ColorScaleCriteria(2)
+        .Type = xlConditionValueNumber
+        .Value = 1
+        .FormatColor.Color = RGB(142, 209, 123)    ' 緑
+    End With
+
+    On Error Resume Next
     rng.NumberFormatLocal = "0%"
+    On Error GoTo 0
     Exit Sub
-Fallback:
-    ' フォールバック：単色で塗り分け
+
+HardFallback:
+    ' 最終フォールバック：しきい値で単色塗り分け（どの環境でも動く）
     ApplyThresholdFill rng
+End Sub
+
+'====================================
+' フォールバック2：しきい値の単色塗り（最終手段）
+' - <0.3 赤、<0.7 黄、>=0.7 緑
+'====================================
+Sub ApplyThresholdFill(rng As Range)
+    Dim c As Range, v As Variant
+    For Each c In rng.Cells
+        v = c.Value
+        If IsNumeric(v) Then
+            If v < 0.3 Then
+                c.Interior.Color = RGB(255, 99, 71)      ' 赤
+            ElseIf v < 0.7 Then
+                c.Interior.Color = RGB(255, 192, 0)      ' 黄
+            Else
+                c.Interior.Color = RGB(142, 209, 123)    ' 緑
+            End If
+        Else
+            c.Interior.ColorIndex = xlNone
+        End If
+    Next c
 End Sub
 
 
