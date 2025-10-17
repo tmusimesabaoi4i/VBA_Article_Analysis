@@ -132,13 +132,14 @@ Sub ApplyDataBar(rng As Range)
         On Error GoTo 0
 
         With db
-            .MinPoint.Modify Type:=xlConditionValueNumber, Value:=0
-            .MaxPoint.Modify Type:=xlConditionValueNumber, Value:=1
-            .BarFillType = xlDataBarFillSolid
-            .BarColor.Color = RGB(91, 155, 213)
-            .AxisPosition = xlDataBarAxisAutomatic
-            .ShowValue = True
-        End With
+        .MinPoint.Type = xlConditionValueNumber
+        .MinPoint.Value = 0
+        .MaxPoint.Type = xlConditionValueNumber
+        .MaxPoint.Value = 1
+        .BarFillType = xlDataBarFillSolid
+        .BarColor.Color = RGB(91, 155, 213)
+        .ShowValue = True
+    End With
 
         ' 進捗率用の表示形式（任意）
         On Error Resume Next
