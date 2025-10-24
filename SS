@@ -1,0 +1,274 @@
+Option Explicit
+
+'============================
+' 実行エントリ
+'============================
+Public Sub RunProgressDashboard()
+    Dim ws As Worksheet: Set ws = ActiveSheet
+    SetupHeaders ws
+    Dim hol As Object: Set hol = LoadHolidaySet("祝日") ' 祝日シート名は必要に応じ変更可
+    RecalculateProgress_BusinessDays ws, hol
+    ApplyFormatting ws
+End Sub
+
+'============================
+' ヘッダー設定
+'============================
+Public Sub SetupHeaders(ByVal ws As Worksheet)
+    With ws
+        .Range("A1").Value = "年"
+        .Range("B1").Value = "月"
+        .Range("C1").Value = "目標値"
+        .Range("D1").Value = "基礎目標値"
+        .Range("E1").Value = "バッファ"
+        .Range("F1").Value = "達成値"
+        .Range("G1").Value = "進捗率(%)"
+        .Range("H1").Value = "遅れ指標(%)"
+        .Range("I1").Value = "残り値"
+        .Range("J1").Value = "1日あたりの遅れ"
+        .Range("K1").Value = "残り日数"
+    End With
+End Sub
+
+'============================
+' 祝日読み込み（A列に日付列挙）
+'============================
+Private Function LoadHolidaySet(Optional ByVal sheetName As String = "祝日") As Object
+    Dim dict As Object: Set dict = CreateObject("Scripting.Dictionary")
+    On Error Resume Next
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(sheetName)
+    On Error GoTo 0
+    
+    If Not ws Is Nothing Then
+        Dim lastRow As Long: lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+        Dim r As Long, d As Date, v As Variant
+        For r = 1 To lastRow
+            v = ws.Cells(r, "A").Value
+            If IsDate(v) Then
+                d = CDate(v)
+                d = DateSerial(Year(d), Month(d), Day(d)) ' 時刻切り捨て
+                If Not dict.Exists(CDbl(d)) Then dict.Add CDbl(d), True
+            End If
+        Next r
+    End If
+    Set LoadHolidaySet = dict
+End Function
+
+'============================
+' 再計算（平日＝土日除外＋祝日除外）
+'============================
+Public Sub RecalculateProgress_BusinessDays(ByVal ws As Worksheet, ByVal holidays As Object)
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    If lastRow < 2 Then Exit Sub
+    
+    Dim todayDT As Date: todayDT = Date
+    Dim y As Long, m As Long
+    Dim goal As Double, baseGoal As Double, buf As Double, achieved As Double
+    Dim totalBD As Long, remainBD As Long, elapsedBD As Long
+    Dim planned As Double, progressPct As Double, delayPct As Double
+    Dim remainVal As Double, perDayLag As Double
+    
+    Dim r As Long
+    For r = 2 To lastRow
+        If IsNumeric(ws.Cells(r, "A").Value) And IsNumeric(ws.Cells(r, "B").Value) Then
+            y = CLng(ws.Cells(r, "A").Value)
+            m = CLng(ws.Cells(r, "B").Value)
+            If IsValidYearMonth(y, m) Then
+                goal = NzD(ws.Cells(r, "C").Value)
+                baseGoal = NzD(ws.Cells(r, "D").Value)
+                buf = NzD(ws.Cells(r, "E").Value)
+                achieved = NzD(ws.Cells(r, "F").Value)
+                
+                totalBD = TotalBusinessDaysInMonth(y, m, holidays)
+                remainBD = RemainingBusinessDaysFromToday(y, m, todayDT, holidays)
+                elapsedBD = ElapsedBusinessDaysInMonth(y, m, todayDT, holidays)
+                
+                If totalBD > 0 Then
+                    planned = goal * (elapsedBD / totalBD)
+                Else
+                    planned = goal
+                End If
+                
+                If goal > 0 Then
+                    progressPct = achieved / goal
+                    delayPct = (achieved - planned) / goal
+                Else
+                    progressPct = 0
+                    delayPct = 0
+                End If
+                
+                remainVal = achieved - goal ' 不足はマイナス
+                
+                If remainBD > 0 Then
+                    perDayLag = WorksheetFunction.Max(goal - achieved, 0#) / remainBD
+                Else
+                    perDayLag = 0#
+                End If
+                
+                ws.Cells(r, "G").Value = progressPct
+                ws.Cells(r, "H").Value = delayPct
+                ws.Cells(r, "I").Value = remainVal
+                ws.Cells(r, "J").Value = perDayLag
+                ws.Cells(r, "K").Value = remainBD
+            End If
+        End If
+    Next r
+End Sub
+
+'============================
+' 書式・幅・フォント・色分け
+'============================
+Public Sub ApplyFormatting(ByVal ws As Worksheet)
+    With ws
+        .Cells.Font.Name = "メイリオ"
+        .Cells.Font.Size = 11
+        
+        .Columns("A:K").ColumnWidth = 14
+        .Columns("G:H").ColumnWidth = 16
+        .Columns("J:K").ColumnWidth = 16
+        
+        With .Range("A1:K1")
+            .Font.Bold = True
+            .Interior.Color = RGB(240, 240, 240)
+            .HorizontalAlignment = xlCenter
+        End With
+        
+        .Range("C:E").NumberFormat = "0.0"
+        .Range("F:F").NumberFormat = "0.0"
+        .Range("G:H").NumberFormat = "0.0%"
+        .Range("I:J").NumberFormat = "0.0"
+        .Range("K:K").NumberFormat = "0"
+        
+        Dim lastRow As Long
+        lastRow = .Cells(.Rows.Count, "A").End(xlUp).Row
+        If lastRow < 2 Then Exit Sub
+        
+        With .Range("A2:K" & lastRow)
+            .FormatConditions.Delete
+        End With
+        
+        Dim rng As Range: Set rng = .Range("H2:H" & lastRow)
+        rng.FormatConditions.Delete
+        
+        ' 遅れ指標%: 赤(≤-10%), 黄(-10%～+5%), 緑(≥+5%)
+        Dim fc1 As FormatCondition, fc2 As FormatCondition, fc3 As FormatCondition
+        Set fc1 = rng.FormatConditions.Add(Type:=xlCellValue, Operator:=xlLessEqual, Formula1:="=-0.1")
+        fc1.Interior.Color = RGB(255, 200, 200)
+        fc1.Font.Color = RGB(192, 0, 0)
+        
+        Set fc2 = rng.FormatConditions.Add(Type:=xlCellValue, Operator:=xlBetween, Formula1:="=-0.1", Formula2:="=0.05")
+        fc2.Interior.Color = RGB(255, 242, 204)
+        fc2.Font.Color = RGB(156, 101, 0)
+        
+        Set fc3 = rng.FormatConditions.Add(Type:=xlCellValue, Operator:=xlGreaterEqual, Formula1:="=0.05")
+        fc3.Interior.Color = RGB(198, 239, 206)
+        fc3.Font.Color = RGB(0, 97, 0)
+        
+        With .Range("A1:K" & lastRow).Borders
+            .LineStyle = xlContinuous
+            .Color = RGB(200, 200, 200)
+            .Weight = xlThin
+        End With
+        
+        .Range("A:A").HorizontalAlignment = xlCenter
+        .Range("B:B").HorizontalAlignment = xlCenter
+        .Range("K:K").HorizontalAlignment = xlCenter
+    End With
+End Sub
+
+'============================
+' ビジネスデー（平日）カウント系
+'============================
+Private Function TotalBusinessDaysInMonth(ByVal y As Long, ByVal m As Long, ByVal holidays As Object) As Long
+    TotalBusinessDaysInMonth = CountBusinessDays(DateSerial(y, m, 1), DateSerial(y, m + 1, 0), holidays)
+End Function
+
+' 今日から月末までの残り平日
+Private Function RemainingBusinessDaysFromToday(ByVal y As Long, ByVal m As Long, ByVal todayDT As Date, ByVal holidays As Object) As Long
+    Dim ymRow As Long: ymRow = y * 100 + m
+    Dim ymToday As Long: ymToday = Year(todayDT) * 100 + Month(todayDT)
+    Dim firstD As Date, lastD As Date
+    firstD = DateSerial(y, m, 1)
+    lastD = DateSerial(y, m + 1, 0)
+    
+    If ymRow < ymToday Then
+        RemainingBusinessDaysFromToday = 0
+    ElseIf ymRow > ymToday Then
+        RemainingBusinessDaysFromToday = CountBusinessDays(firstD, lastD, holidays)
+    Else
+        Dim startD As Date: startD = todayDT
+        If startD < firstD Then startD = firstD
+        If startD > lastD Then
+            RemainingBusinessDaysFromToday = 0
+        Else
+            RemainingBusinessDaysFromToday = CountBusinessDays(startD, lastD, holidays)
+        End If
+    End If
+End Function
+
+' 経過平日（当月は月初～前日まで、過去月は総平日、未来月は0）
+Private Function ElapsedBusinessDaysInMonth(ByVal y As Long, ByVal m As Long, ByVal todayDT As Date, ByVal holidays As Object) As Long
+    Dim ymRow As Long: ymRow = y * 100 + m
+    Dim ymToday As Long: ymToday = Year(todayDT) * 100 + Month(todayDT)
+    Dim firstD As Date, lastD As Date
+    firstD = DateSerial(y, m, 1)
+    lastD = DateSerial(y, m + 1, 0)
+    
+    If ymRow < ymToday Then
+        ElapsedBusinessDaysInMonth = CountBusinessDays(firstD, lastD, holidays)
+    ElseIf ymRow > ymToday Then
+        ElapsedBusinessDaysInMonth = 0
+    Else
+        Dim endD As Date: endD = DateAdd("d", -1, todayDT)
+        If endD < firstD Then
+            ElapsedBusinessDaysInMonth = 0
+        Else
+            ElapsedBusinessDaysInMonth = CountBusinessDays(firstD, endD, holidays)
+        End If
+    End If
+End Function
+
+' 期間内ビジネスデー数（両端含む）：月〜金 かつ 祝日表に含まれない日
+Private Function CountBusinessDays(ByVal dStart As Date, ByVal dEnd As Date, ByVal holidays As Object) As Long
+    Dim d As Date, cnt As Long
+    If dEnd < dStart Then Exit Function
+    For d = dStart To dEnd
+        If IsBusinessDay(d, holidays) Then cnt = cnt + 1
+    Next d
+    CountBusinessDays = cnt
+End Function
+
+Private Function IsBusinessDay(ByVal d As Date, ByVal holidays As Object) As Boolean
+    Dim wd As Integer: wd = Weekday(d, vbMonday)
+    If wd < 1 Or wd > 5 Then
+        IsBusinessDay = False
+    Else
+        Dim key As Double: key = CDbl(DateSerial(Year(d), Month(d), Day(d)))
+        IsBusinessDay = Not holidays.Exists(key)
+    End If
+End Function
+
+'============================
+' 汎用ユーティリティ
+'============================
+Private Function NzD(v As Variant, Optional ByVal def As Double = 0#) As Double
+    If IsError(v) Then
+        NzD = def
+    ElseIf IsNull(v) Or IsEmpty(v) Or v = "" Then
+        NzD = def
+    ElseIf Not IsNumeric(v) Then
+        NzD = def
+    Else
+        NzD = CDbl(v)
+    End If
+End Function
+
+Private Function IsValidYearMonth(ByVal y As Long, ByVal m As Long) As Boolean
+    On Error GoTo bad
+    Dim d As Date: d = DateSerial(y, m, 1)
+    IsValidYearMonth = (m >= 1 And m <= 12 And y >= 1900 And y <= 9999)
+    Exit Function
+bad:
+    IsValidYearMonth = False
+End Function
