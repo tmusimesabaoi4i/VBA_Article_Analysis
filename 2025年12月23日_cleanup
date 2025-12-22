@@ -1,0 +1,45 @@
+Option Explicit
+
+'============================================================
+' Cleanup（全シート一括）：フォントだけを標準化
+' - 対象：ThisWorkbook.Worksheets 全部
+' - データは変更しない
+' - 枠線/塗りつぶし/条件付き書式などには触らない
+' - 各シートの UsedRange のみ対象
+'============================================================
+Public Sub Cleanup_FontOnly_AllSheets_Meiryo10()
+    Dim wb As Workbook
+    Set wb = ThisWorkbook
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+
+    Dim ws As Worksheet
+    For Each ws In wb.Worksheets
+        If Not ws.UsedRange Is Nothing Then
+            With ws.UsedRange.Font
+                .Name = "メイリオ"
+                .Size = 10
+
+                .Bold = False
+                .Italic = False
+                .Underline = xlUnderlineStyleNone
+                .Strikethrough = False
+                .Superscript = False
+                .Subscript = False
+
+                .ColorIndex = xlColorIndexAutomatic
+
+                On Error Resume Next
+                .Shadow = False
+                .OutlineFont = False
+                On Error GoTo 0
+            End With
+        End If
+    Next ws
+
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+
+    MsgBox "全シートのフォントをメイリオ 10pt に統一し、文字装飾（太字等）を解除しました。", vbInformation
+End Sub
