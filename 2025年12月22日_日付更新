@@ -1,0 +1,142 @@
+Option Explicit
+
+'============================================================
+' A列の絶対パスのファイルについて、最終更新日時だけを「今」に更新する
+' - 内容は変更しない（Windows API: SetFileTime を使用）
+' - 結果をB列に出力
+'============================================================
+Public Sub TouchFilesFromColA()
+    Dim ws As Worksheet
+    Set ws = ActiveSheet
+
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    If lastRow < 1 Then
+        MsgBox "A列にパスがありません。", vbInformation
+        Exit Sub
+    End If
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+
+    Dim r As Long
+    Dim p As String
+    Dim ok As Boolean
+
+    Dim cntOK As Long, cntNG As Long, cntSkip As Long
+
+    For r = 1 To lastRow
+        p = Trim$(CStr(ws.Cells(r, "A").Value))
+
+        If Len(p) = 0 Then
+            ws.Cells(r, "B").Value = "SKIP: 空"
+            cntSkip = cntSkip + 1
+        Else
+            ok = TouchOneFile_LastWriteTimeToNow(p)
+            If ok Then
+                ws.Cells(r, "B").Value = "OK"
+                cntOK = cntOK + 1
+            Else
+                ws.Cells(r, "B").Value = "NG: 更新失敗/存在しない/アクセス不可"
+                cntNG = cntNG + 1
+            End If
+        End If
+    Next r
+
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+
+    MsgBox "完了" & vbCrLf & _
+           "OK: " & cntOK & vbCrLf & _
+           "NG: " & cntNG & vbCrLf & _
+           "SKIP: " & cntSkip, vbInformation
+End Sub
+
+'============================================================
+' 1ファイルの最終更新日時(LastWriteTime)を「今」に更新する
+' - 成功: True / 失敗: False
+'============================================================
+Private Function TouchOneFile_LastWriteTimeToNow(ByVal filePath As String) As Boolean
+    On Error GoTo EH
+
+    ' Dir で存在チェック（長いパスや特殊ケースはここで落ちることがある点に注意）
+    If Len(Dir$(filePath, vbNormal Or vbHidden Or vbSystem Or vbReadOnly Or vbArchive)) = 0 Then
+        TouchOneFile_LastWriteTimeToNow = False
+        Exit Function
+    End If
+
+    Dim hFile As LongPtr
+    Dim ftNow As FILETIME
+    Dim ret As Long
+
+    ' 共有モードは読み書き削除を許可（開かれていても通る可能性を上げる）
+    hFile = CreateFileA( _
+        filePath, _
+        FILE_WRITE_ATTRIBUTES, _
+        FILE_SHARE_READ Or FILE_SHARE_WRITE Or FILE_SHARE_DELETE, _
+        0, _
+        OPEN_EXISTING, _
+        FILE_ATTRIBUTE_NORMAL, _
+        0 _
+    )
+
+    If hFile = INVALID_HANDLE_VALUE Then
+        TouchOneFile_LastWriteTimeToNow = False
+        Exit Function
+    End If
+
+    ' 現在時刻(UTC)を FILETIME で取得し、最終更新日時に設定
+    GetSystemTimeAsFileTime ftNow
+
+    ' 作成日時/最終アクセス日時は変更しない（NULLを渡す）
+    ret = SetFileTime(hFile, ByVal 0&, ByVal 0&, ftNow)
+
+    CloseHandle hFile
+
+    TouchOneFile_LastWriteTimeToNow = (ret <> 0)
+    Exit Function
+
+EH:
+    TouchOneFile_LastWriteTimeToNow = False
+End Function
+
+'======================
+' Windows API 宣言部
+'======================
+Private Type FILETIME
+    dwLowDateTime  As Long
+    dwHighDateTime As Long
+End Type
+
+Private Const FILE_WRITE_ATTRIBUTES As Long = &H100
+Private Const FILE_SHARE_READ As Long = &H1
+Private Const FILE_SHARE_WRITE As Long = &H2
+Private Const FILE_SHARE_DELETE As Long = &H4
+Private Const OPEN_EXISTING As Long = 3
+Private Const FILE_ATTRIBUTE_NORMAL As Long = &H80
+Private Const INVALID_HANDLE_VALUE As LongPtr = -1
+
+Private Declare PtrSafe Function CreateFileA Lib "kernel32" ( _
+    ByVal lpFileName As String, _
+    ByVal dwDesiredAccess As Long, _
+    ByVal dwShareMode As Long, _
+    ByVal lpSecurityAttributes As LongPtr, _
+    ByVal dwCreationDisposition As Long, _
+    ByVal dwFlagsAndAttributes As Long, _
+    ByVal hTemplateFile As LongPtr _
+) As LongPtr
+
+Private Declare PtrSafe Function SetFileTime Lib "kernel32" ( _
+    ByVal hFile As LongPtr, _
+    lpCreationTime As Any, _
+    lpLastAccessTime As Any, _
+    lpLastWriteTime As Any _
+) As Long
+
+Private Declare PtrSafe Function CloseHandle Lib "kernel32" ( _
+    ByVal hObject As LongPtr _
+) As Long
+
+Private Declare PtrSafe Sub GetSystemTimeAsFileTime Lib "kernel32" ( _
+    lpSystemTimeAsFileTime As FILETIME _
+)
