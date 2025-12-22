@@ -1,13 +1,17 @@
 Option Explicit
 
 '============================================================
-' Cleanup（全シート一括）：フォントだけを標準化
+' Cleanup（全シート一括）
+' 1) フォント：メイリオ 10pt / 太字など装飾解除（フォントのみ）
+' 2) セル連結は維持したまま、行の高さ・列の幅を統一
 ' - 対象：ThisWorkbook.Worksheets 全部
-' - データは変更しない
-' - 枠線/塗りつぶし/条件付き書式などには触らない
-' - 各シートの UsedRange のみ対象
+' - データ/枠線/塗りつぶし/結合状態は変更しない
+' - 非表示行/列はそのまま（高さ/幅は触らない）
 '============================================================
-Public Sub Cleanup_FontOnly_AllSheets_Meiryo10()
+Public Sub Cleanup_AllSheets_FontAndUniformGrid_Meiryo10()
+    Const STD_ROW_HEIGHT As Double = 18    ' ← 好きな高さに
+    Const STD_COL_WIDTH  As Double = 10    ' ← 好きな幅に
+
     Dim wb As Workbook
     Set wb = ThisWorkbook
 
@@ -16,30 +20,68 @@ Public Sub Cleanup_FontOnly_AllSheets_Meiryo10()
 
     Dim ws As Worksheet
     For Each ws In wb.Worksheets
-        If Not ws.UsedRange Is Nothing Then
-            With ws.UsedRange.Font
-                .Name = "メイリオ"
-                .Size = 10
+        Dim ur As Range
+        Set ur = ws.UsedRange
 
-                .Bold = False
-                .Italic = False
-                .Underline = xlUnderlineStyleNone
-                .Strikethrough = False
-                .Superscript = False
-                .Subscript = False
-
-                .ColorIndex = xlColorIndexAutomatic
-
-                On Error Resume Next
-                .Shadow = False
-                .OutlineFont = False
-                On Error GoTo 0
-            End With
+        ' 実質空シートはスキップ（UsedRangeはA1を返すことがある）
+        If Application.WorksheetFunction.CountA(ur) = 0 Then
+            GoTo NextSheet
         End If
+
+        '----------------------------
+        ' 1) フォントだけ標準化（装飾解除）
+        '----------------------------
+        With ur.Font
+            .Name = "メイリオ"
+            .Size = 10
+
+            .Bold = False
+            .Italic = False
+            .Underline = xlUnderlineStyleNone
+            .Strikethrough = False
+            .Superscript = False
+            .Subscript = False
+
+            .ColorIndex = xlColorIndexAutomatic
+
+            On Error Resume Next
+            .Shadow = False
+            .OutlineFont = False
+            On Error GoTo 0
+        End With
+
+        '----------------------------
+        ' 2) 行高・列幅を統一（結合は維持）
+        '    ※非表示行/列は触らない
+        '----------------------------
+        Dim firstRow As Long, lastRow As Long, firstCol As Long, lastCol As Long
+        firstRow = ur.Row
+        lastRow = ur.Row + ur.Rows.Count - 1
+        firstCol = ur.Column
+        lastCol = ur.Column + ur.Columns.Count - 1
+
+        Dim r As Long, c As Long
+
+        ' 列幅
+        For c = firstCol To lastCol
+            If Not ws.Columns(c).Hidden Then
+                ws.Columns(c).ColumnWidth = STD_COL_WIDTH
+            End If
+        Next c
+
+        ' 行高
+        For r = firstRow To lastRow
+            If Not ws.Rows(r).Hidden Then
+                ws.Rows(r).RowHeight = STD_ROW_HEIGHT
+            End If
+        Next r
+
+NextSheet:
+        Set ur = Nothing
     Next ws
 
     Application.EnableEvents = True
     Application.ScreenUpdating = True
 
-    MsgBox "全シートのフォントをメイリオ 10pt に統一し、文字装飾（太字等）を解除しました。", vbInformation
+    MsgBox "全シート：フォント統一（メイリオ10pt/装飾解除）＋行高/列幅の統一が完了しました。", vbInformation
 End Sub
