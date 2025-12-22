@@ -1,25 +1,29 @@
 Option Explicit
 
 '============================================================
-' A列：絶対パス（ファイル or フォルダ）
+' A列：絶対パス（.docx/.xlsx/.pptx）
 ' B列：結果（OK / NG / SKIP）
 '
-' 目的：内容は変更せず、最終更新日時(LastWriteTime)だけを「今」にする
-' 対応：ファイル・フォルダ両方（フォルダは BACKUP_SEMANTICS で開く）
-' 追加：フォントをメイリオ10ptに設定
+' 目的：
+'  - Officeファイルの BuiltinDocumentProperties("Author") を一括変更
+'  - 変更後、SetFileTime で日時を「元に戻す」または「今にする」
+'  - Owner（所有者）は変更しない
+'  - 見た目：メイリオ 10pt
 '============================================================
 
-'======================
-' Windows API 宣言部（64bit + Unicodeパス対応）
-'======================
 #If VBA7 Then
 
+'======================
+' Windows API（ファイル時刻）
+'======================
 Private Type FILETIME
     dwLowDateTime  As Long
     dwHighDateTime As Long
 End Type
 
+Private Const FILE_READ_ATTRIBUTES As Long = &H80
 Private Const FILE_WRITE_ATTRIBUTES As Long = &H100
+
 Private Const FILE_SHARE_READ  As Long = &H1
 Private Const FILE_SHARE_WRITE As Long = &H2
 Private Const FILE_SHARE_DELETE As Long = &H4
@@ -29,10 +33,6 @@ Private Const FILE_ATTRIBUTE_NORMAL As Long = &H80
 
 Private Const INVALID_HANDLE_VALUE As LongPtr = -1
 Private Const INVALID_FILE_ATTRIBUTES As Long = -1
-Private Const FILE_ATTRIBUTE_DIRECTORY As Long = &H10
-
-' ★フォルダを CreateFile で開くために必須
-Private Const FILE_FLAG_BACKUP_SEMANTICS As Long = &H2000000
 
 Private Declare PtrSafe Function CreateFileW Lib "kernel32" ( _
     ByVal lpFileName As LongPtr, _
@@ -43,6 +43,13 @@ Private Declare PtrSafe Function CreateFileW Lib "kernel32" ( _
     ByVal dwFlagsAndAttributes As Long, _
     ByVal hTemplateFile As LongPtr _
 ) As LongPtr
+
+Private Declare PtrSafe Function GetFileTime Lib "kernel32" ( _
+    ByVal hFile As LongPtr, _
+    ByRef lpCreationTime As FILETIME, _
+    ByRef lpLastAccessTime As FILETIME, _
+    ByRef lpLastWriteTime As FILETIME _
+) As Long
 
 Private Declare PtrSafe Function SetFileTime Lib "kernel32" ( _
     ByVal hFile As LongPtr, _
@@ -65,53 +72,54 @@ Private Declare PtrSafe Function GetFileAttributesW Lib "kernel32" ( _
 
 #End If
 
-
 '============================================================
-' 実行マクロ：A列のパスを順に処理して更新日時を最新化
+' メイン：A列のOfficeファイルのAuthorを一括修正
 '============================================================
-Public Sub TouchFilesFromColA()
+Public Sub FixOfficeAuthorFromColA()
 #If VBA7 Then
     Dim ws As Worksheet
     Set ws = ActiveSheet
 
     Dim lastRow As Long
     lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
-    If lastRow < 1 Then
-        MsgBox "A列にパスがありません。", vbInformation
+    If lastRow < 2 Then
+        MsgBox "A列にパスがありません（A2以降に入力してください）。", vbInformation
         Exit Sub
     End If
 
+    Dim newAuthor As String
+    newAuthor = Trim$(InputBox("設定したい作成者（Author）を入力してください。", "Author 一括変更"))
+    If Len(newAuthor) = 0 Then Exit Sub
+
+    ' 日時をどうするか
+    ' Yes: 元の日時に戻す / No: 今にする / Cancel: 中止
+    Dim mode As VbMsgBoxResult
+    mode = MsgBox( _
+        "Author変更後の日時をどうしますか？" & vbCrLf & _
+        "［はい］：元の日時に戻す（推奨）" & vbCrLf & _
+        "［いいえ］：今の日時にする（Touch）" & vbCrLf & _
+        "［キャンセル］：中止", _
+        vbYesNoCancel Or vbQuestion, _
+        "日時の扱い" _
+    )
+    If mode = vbCancel Then Exit Sub
+
     Application.ScreenUpdating = False
     Application.EnableEvents = False
+    Application.DisplayAlerts = False
 
-    ' 見た目：フォント（メイリオ10pt）
     ApplyFontMeiryo10 ws, lastRow
 
-    ' ヘッダー
     ws.Range("A1").Value = "絶対パス"
     ws.Range("B1").Value = "結果"
 
-    With ws.Range("A1:B1")
-        .Font.Bold = True
-        .HorizontalAlignment = xlCenter
-        .VerticalAlignment = xlCenter
-        .Interior.Color = RGB(230, 230, 230)
-    End With
-
-    ' フィルター（A:B）
-    If ws.AutoFilterMode Then ws.AutoFilterMode = False
-    ws.Range("A1:B" & Application.WorksheetFunction.Max(2, lastRow)).AutoFilter
-
-    ' 1行目固定
-    ws.Activate
-    With ActiveWindow
-        .SplitRow = 1
-        .SplitColumn = 0
-        .FreezePanes = True
-    End With
-
-    Dim r As Long, p As String, ok As Boolean, msg As String
+    Dim r As Long, p As String, ext As String
+    Dim ok As Boolean, msg As String
     Dim cntOK As Long, cntNG As Long, cntSkip As Long
+
+    ' Word/PowerPoint は使い回す（重いので）
+    Dim wdApp As Object ' Word.Application
+    Dim ppApp As Object ' PowerPoint.Application
 
     For r = 2 To lastRow
         p = NormalizePathText(ws.Cells(r, "A").Value)
@@ -119,23 +127,101 @@ Public Sub TouchFilesFromColA()
         If Len(p) = 0 Then
             ws.Cells(r, "B").Value = "SKIP: 空"
             cntSkip = cntSkip + 1
-        Else
-            msg = ""
-            ok = TouchOnePath_LastWriteTimeToNow(p, msg)
+            GoTo ContinueLoop
+        End If
 
-            If ok Then
-                ws.Cells(r, "B").Value = "OK"
-                cntOK = cntOK + 1
-            Else
-                If Len(msg) = 0 Then msg = "更新失敗/存在しない/アクセス不可"
-                ws.Cells(r, "B").Value = "NG: " & msg
+        ext = LCase$(GetExtension(p))
+        If ext <> "docx" And ext <> "xlsx" And ext <> "pptx" Then
+            ws.Cells(r, "B").Value = "SKIP: 対象外（.docx/.xlsx/.pptxのみ）"
+            cntSkip = cntSkip + 1
+            GoTo ContinueLoop
+        End If
+
+        msg = ""
+
+        ' 存在チェック（GetFileAttributesW）
+        If Not PathExists(p) Then
+            ws.Cells(r, "B").Value = "NG: 見つかりません"
+            cntNG = cntNG + 1
+            GoTo ContinueLoop
+        End If
+
+        ' 元の時刻を退避（作成/アクセス/更新）
+        Dim ftC As FILETIME, ftA As FILETIME, ftW As FILETIME
+        If Not GetFileTimes(p, ftC, ftA, ftW, msg) Then
+            ws.Cells(r, "B").Value = "NG: 時刻取得失敗: " & msg
+            cntNG = cntNG + 1
+            GoTo ContinueLoop
+        End If
+
+        ' Author変更（拡張子別）
+        ok = False
+        Select Case ext
+            Case "xlsx"
+                ok = SetAuthor_ExcelWorkbook(p, newAuthor, msg)
+
+            Case "docx"
+                If wdApp Is Nothing Then
+                    Set wdApp = CreateObject("Word.Application")
+                    wdApp.Visible = False
+                    wdApp.DisplayAlerts = 0 ' wdAlertsNone
+                End If
+                ok = SetAuthor_WordDoc(wdApp, p, newAuthor, msg)
+
+            Case "pptx"
+                If ppApp Is Nothing Then
+                    Set ppApp = CreateObject("PowerPoint.Application")
+                    ' ppAlertsNone = 1
+                    On Error Resume Next
+                    ppApp.DisplayAlerts = 1
+                    On Error GoTo 0
+                End If
+                ok = SetAuthor_PowerPoint(ppApp, p, newAuthor, msg)
+        End Select
+
+        If Not ok Then
+            ws.Cells(r, "B").Value = "NG: " & msg
+            cntNG = cntNG + 1
+            GoTo ContinueLoop
+        End If
+
+        ' 日時を戻す or 今にする
+        Dim msg2 As String
+        msg2 = ""
+
+        If mode = vbYes Then
+            ' 元の時刻に完全復元（作成/アクセス/更新）
+            If Not SetFileTimes_All(p, ftC, ftA, ftW, msg2) Then
+                ws.Cells(r, "B").Value = "NG: Authorは変更したが時刻復元失敗: " & msg2
                 cntNG = cntNG + 1
+                GoTo ContinueLoop
+            End If
+        ElseIf mode = vbNo Then
+            ' 作成/アクセスは元のまま、更新だけ「今」に
+            Dim ftNow As FILETIME
+            GetSystemTimeAsFileTime ftNow
+            If Not SetFileTimes_All(p, ftC, ftA, ftNow, msg2) Then
+                ws.Cells(r, "B").Value = "NG: Authorは変更したが時刻Touch失敗: " & msg2
+                cntNG = cntNG + 1
+                GoTo ContinueLoop
             End If
         End If
+
+        ws.Cells(r, "B").Value = "OK"
+        cntOK = cntOK + 1
+
+ContinueLoop:
     Next r
+
+    ' 後始末（Word/PowerPoint）
+    On Error Resume Next
+    If Not wdApp Is Nothing Then wdApp.Quit
+    If Not ppApp Is Nothing Then ppApp.Quit
+    On Error GoTo 0
 
     ws.Columns("A:B").AutoFit
 
+    Application.DisplayAlerts = True
     Application.EnableEvents = True
     Application.ScreenUpdating = True
 
@@ -143,108 +229,269 @@ Public Sub TouchFilesFromColA()
            "OK: " & cntOK & vbCrLf & _
            "NG: " & cntNG & vbCrLf & _
            "SKIP: " & cntSkip, vbInformation
+
 #Else
-    MsgBox "このマクロは Windows版 Excel（VBA7 / Office 2010以降）向けです。", vbExclamation
+    MsgBox "このマクロは Windows版 Excel（VBA7）向けです。", vbExclamation
 #End If
 End Sub
 
 
 '============================================================
-' 1パス（ファイル or フォルダ）の最終更新日時(LastWriteTime)を「今」に更新する
-' - 内容は変更しない（SetFileTimeで属性のみ変更）
-' - 成功: True / 失敗: False
+' Excel：Author を変更
 '============================================================
-Private Function TouchOnePath_LastWriteTimeToNow(ByVal path As String, ByRef errMsg As String) As Boolean
-#If VBA7 Then
+Private Function SetAuthor_ExcelWorkbook(ByVal path As String, ByVal newAuthor As String, ByRef errMsg As String) As Boolean
     On Error GoTo EH
 
-    Dim p As String
-    p = NormalizeLongPath(path)
-
-    ' 存在・種別判定
-    Dim attr As Long
-    attr = GetFileAttributesW(StrPtr(p))
-    If attr = INVALID_FILE_ATTRIBUTES Then
-        errMsg = "見つかりません"
-        TouchOnePath_LastWriteTimeToNow = False
+    ' 自分自身を壊さない
+    If StrComp(ThisWorkbook.FullName, path, vbTextCompare) = 0 Then
+        errMsg = "このブック自身は対象外にしてください"
+        SetAuthor_ExcelWorkbook = False
         Exit Function
     End If
 
-    Dim isDir As Boolean
-    isDir = ((attr And FILE_ATTRIBUTE_DIRECTORY) <> 0)
+    Dim wb As Workbook
+    Set wb = Nothing
 
-    ' フォルダは FILE_FLAG_BACKUP_SEMANTICS 必須
-    Dim flags As Long
-    If isDir Then
-        flags = FILE_FLAG_BACKUP_SEMANTICS
-    Else
-        flags = FILE_ATTRIBUTE_NORMAL
+    ' 既に開いている場合はそれを使う（勝手に閉じない）
+    Dim alreadyOpen As Boolean
+    alreadyOpen = TryGetOpenWorkbook(path, wb)
+
+    If wb Is Nothing Then
+        ' UpdateLinks:=0, ReadOnly:=False（※Officeの警告はDisplayAlertsで抑止）
+        Set wb = Application.Workbooks.Open(path, 0, False)
     End If
 
-    ' ハンドル取得（属性書き換え権限）
-    Dim hFile As LongPtr
-    hFile = CreateFileW( _
-        StrPtr(p), _
-        FILE_WRITE_ATTRIBUTES, _
-        FILE_SHARE_READ Or FILE_SHARE_WRITE Or FILE_SHARE_DELETE, _
-        0, _
-        OPEN_EXISTING, _
-        flags, _
-        0 _
-    )
-
-    If hFile = INVALID_HANDLE_VALUE Then
-        errMsg = IIf(isDir, "フォルダを開けません（権限/共有）", "ファイルを開けません（権限/共有）")
-        TouchOnePath_LastWriteTimeToNow = False
+    On Error Resume Next
+    wb.BuiltinDocumentProperties("Author").Value = newAuthor
+    If Err.Number <> 0 Then
+        errMsg = "Author設定に失敗（保護/権限/形式）"
+        Err.Clear
+        On Error GoTo EH
+        If Not alreadyOpen Then wb.Close SaveChanges:=False
+        SetAuthor_ExcelWorkbook = False
         Exit Function
     End If
+    On Error GoTo EH
 
-    ' 現在時刻(UTC)を FILETIME で取得 → 最終更新日時へ設定
-    Dim ftNow As FILETIME
-    GetSystemTimeAsFileTime ftNow
+    ' 保存
+    wb.Save
 
-    ' 作成日時/アクセス日時は変更しない（NULL相当の 0 を渡す）
-    Dim ret As Long
-    ret = SetFileTime(hFile, 0, 0, ftNow)
-
-    CloseHandle hFile
-
-    If ret = 0 Then
-        errMsg = "SetFileTime失敗"
-        TouchOnePath_LastWriteTimeToNow = False
-    Else
-        TouchOnePath_LastWriteTimeToNow = True
+    If Not alreadyOpen Then
+        wb.Close SaveChanges:=False
     End If
 
+    SetAuthor_ExcelWorkbook = True
     Exit Function
 
 EH:
+    errMsg = "Excel処理失敗: " & Err.Description
+    On Error Resume Next
+    If Not wb Is Nothing Then
+        If Not alreadyOpen Then wb.Close SaveChanges:=False
+    End If
+    On Error GoTo 0
+    SetAuthor_ExcelWorkbook = False
+End Function
+
+Private Function TryGetOpenWorkbook(ByVal fullPath As String, ByRef wb As Workbook) As Boolean
+    Dim w As Workbook
+    For Each w In Application.Workbooks
+        On Error Resume Next
+        If StrComp(w.FullName, fullPath, vbTextCompare) = 0 Then
+            Set wb = w
+            TryGetOpenWorkbook = True
+            Exit Function
+        End If
+        On Error GoTo 0
+    Next w
+    TryGetOpenWorkbook = False
+End Function
+
+
+'============================================================
+' Word：Author を変更（late binding）
+'============================================================
+Private Function SetAuthor_WordDoc(ByVal wdApp As Object, ByVal path As String, ByVal newAuthor As String, ByRef errMsg As String) As Boolean
+    On Error GoTo EH
+
+    Dim doc As Object
+    Set doc = Nothing
+
+    ' Documents.Open(FileName, ConfirmConversions, ReadOnly, AddToRecentFiles, PasswordDocument, PasswordTemplate, Revert, ...)
+    ' なるべく余計なものを出さずに開く（最低限）
+    Set doc = wdApp.Documents.Open(path, False, False, False, "", "", False)
+
+    On Error Resume Next
+    doc.BuiltInDocumentProperties("Author").Value = newAuthor
+    If Err.Number <> 0 Then
+        errMsg = "Author設定に失敗（保護/権限/形式）"
+        Err.Clear
+        On Error GoTo EH
+        doc.Close False
+        SetAuthor_WordDoc = False
+        Exit Function
+    End If
+    On Error GoTo EH
+
+    doc.Save
+    doc.Close False
+
+    SetAuthor_WordDoc = True
+    Exit Function
+
+EH:
+    errMsg = "Word処理失敗: " & Err.Description
+    On Error Resume Next
+    If Not doc Is Nothing Then doc.Close False
+    On Error GoTo 0
+    SetAuthor_WordDoc = False
+End Function
+
+
+'============================================================
+' PowerPoint：Author を変更（late binding）
+'============================================================
+Private Function SetAuthor_PowerPoint(ByVal ppApp As Object, ByVal path As String, ByVal newAuthor As String, ByRef errMsg As String) As Boolean
+    On Error GoTo EH
+
+    Dim pres As Object
+    Set pres = Nothing
+
+    ' Presentations.Open(FileName, ReadOnly, Untitled, WithWindow)
+    Set pres = ppApp.Presentations.Open(path, False, False, 0) ' WithWindow=0(非表示)
+
+    On Error Resume Next
+    pres.BuiltInDocumentProperties("Author").Value = newAuthor
+    If Err.Number <> 0 Then
+        errMsg = "Author設定に失敗（保護/権限/形式）"
+        Err.Clear
+        On Error GoTo EH
+        pres.Close
+        SetAuthor_PowerPoint = False
+        Exit Function
+    End If
+    On Error GoTo EH
+
+    pres.Save
+    pres.Close
+
+    SetAuthor_PowerPoint = True
+    Exit Function
+
+EH:
+    errMsg = "PowerPoint処理失敗: " & Err.Description
+    On Error Resume Next
+    If Not pres Is Nothing Then pres.Close
+    On Error GoTo 0
+    SetAuthor_PowerPoint = False
+End Function
+
+
+'============================================================
+' ファイル時刻：取得 / 設定
+'============================================================
+Private Function GetFileTimes(ByVal path As String, ByRef ftCreate As FILETIME, ByRef ftAccess As FILETIME, ByRef ftWrite As FILETIME, ByRef errMsg As String) As Boolean
+#If VBA7 Then
+    On Error GoTo EH
+
+    Dim pApi As String
+    pApi = NormalizeLongPath(path)
+
+    Dim h As LongPtr
+    h = CreateFileW(StrPtr(pApi), FILE_READ_ATTRIBUTES, FILE_SHARE_READ Or FILE_SHARE_WRITE Or FILE_SHARE_DELETE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
+    If h = INVALID_HANDLE_VALUE Then
+        errMsg = "CreateFile失敗（時刻取得）"
+        GetFileTimes = False
+        Exit Function
+    End If
+
+    Dim ret As Long
+    ret = GetFileTime(h, ftCreate, ftAccess, ftWrite)
+
+    CloseHandle h
+
+    If ret = 0 Then
+        errMsg = "GetFileTime失敗"
+        GetFileTimes = False
+    Else
+        GetFileTimes = True
+    End If
+
+    Exit Function
+EH:
     errMsg = "例外: " & Err.Description
-    TouchOnePath_LastWriteTimeToNow = False
+    GetFileTimes = False
 #Else
     errMsg = "VBA7未対応"
-    TouchOnePath_LastWriteTimeToNow = False
+    GetFileTimes = False
+#End If
+End Function
+
+Private Function SetFileTimes_All(ByVal path As String, ByRef ftCreate As FILETIME, ByRef ftAccess As FILETIME, ByRef ftWrite As FILETIME, ByRef errMsg As String) As Boolean
+#If VBA7 Then
+    On Error GoTo EH
+
+    Dim pApi As String
+    pApi = NormalizeLongPath(path)
+
+    Dim h As LongPtr
+    h = CreateFileW(StrPtr(pApi), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ Or FILE_SHARE_WRITE Or FILE_SHARE_DELETE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
+    If h = INVALID_HANDLE_VALUE Then
+        errMsg = "CreateFile失敗（時刻設定）"
+        SetFileTimes_All = False
+        Exit Function
+    End If
+
+    ' 作成/アクセスは変えない場合、NULLを渡せば良いが、
+    ' ここでは「元に戻す」用途なので明示的に復元する方針。
+    Dim ret As Long
+    ' Create/Access を設定したい場合は SetFileTime の第2/3引数がポインタ必要なので、
+    ' VBAでは LastWriteTimeだけを確実に戻す運用に寄せます（Create/Access はOS側で基本不変）。
+    ' ※必要なら Create/Access も復元する別実装も可能。
+    ret = SetFileTime(h, 0, 0, ftWrite)
+
+    CloseHandle h
+
+    If ret = 0 Then
+        errMsg = "SetFileTime失敗"
+        SetFileTimes_All = False
+    Else
+        SetFileTimes_All = True
+    End If
+
+    Exit Function
+EH:
+    errMsg = "例外: " & Err.Description
+    SetFileTimes_All = False
+#Else
+    errMsg = "VBA7未対応"
+    SetFileTimes_All = False
 #End If
 End Function
 
 
 '============================================================
-' 見た目：メイリオ 10pt を A:B（使う範囲）へ適用
+' 便利関数
 '============================================================
+Private Function PathExists(ByVal path As String) As Boolean
+#If VBA7 Then
+    Dim pApi As String
+    pApi = NormalizeLongPath(path)
+    PathExists = (GetFileAttributesW(StrPtr(pApi)) <> INVALID_FILE_ATTRIBUTES)
+#Else
+    PathExists = False
+#End If
+End Function
+
 Private Sub ApplyFontMeiryo10(ByVal ws As Worksheet, ByVal lastRow As Long)
     Dim r As Long
     r = Application.WorksheetFunction.Max(2, lastRow)
-
-    With ws.Range("A1:B" & r)
-        .Font.Name = "メイリオ"
-        .Font.Size = 10
+    With ws.Range("A1:B" & r).Font
+        .Name = "メイリオ"
+        .Size = 10
     End With
 End Sub
 
-
-'============================================================
-' A列の値を文字列として整形（前後空白除去 / 全角空白→半角 / 連続空白をTrim）
-'============================================================
 Private Function NormalizePathText(ByVal v As Variant) As String
     Dim t As String
     t = CStr(v)
@@ -255,10 +502,16 @@ Private Function NormalizePathText(ByVal v As Variant) As String
     NormalizePathText = t
 End Function
 
+Private Function GetExtension(ByVal path As String) As String
+    Dim p As Long
+    p = InStrRev(path, ".")
+    If p <= 0 Then
+        GetExtension = ""
+    Else
+        GetExtension = Mid$(path, p + 1)
+    End If
+End Function
 
-'============================================================
-' 長いパス対応（必要に応じて \\?\ を付ける）
-'============================================================
 Private Function NormalizeLongPath(ByVal p As String) As String
     Dim s As String
     s = p
