@@ -1,0 +1,440 @@
+Option Explicit
+
+'============================================================
+' ★ 必ずモジュール先頭に置く（他モジュールからも参照するため Public）
+'============================================================
+Public Const INDEX_SHEET  As String = "_LockerIndex"
+Public Const ROSTER_SHEET As String = "名簿"
+
+'============================================================
+' ユーザが実行できるマクロはこの2つだけ
+'============================================================
+
+' ① ロッカー生成（ロッカー名＝シート名）
+'  - A1 にロッカー名
+'  - 表は B2 開始（1行下＆1列右）
+'  - B2="段"、C2～がロッカー番号、B3～が段
+'  - 入力升目は C3～（天袋がある場合もC3～に含める）
+Public Sub CreateLockerSheet()
+    Dim wb As Workbook: Set wb = TargetWB()
+
+    Dim lockerName As String
+    lockerName = Trim$(InputBox("ロッカー名（＝シート名）", "ロッカー名", "壁面ロッカー"))
+    If Len(lockerName) = 0 Then Exit Sub
+
+    Dim startNo As Long, endNo As Long, tiers As Long
+    startNo = CLng(Val(InputBox("開始列番号（例：1）", "開始列番号", "1")))
+    endNo = CLng(Val(InputBox("終了列番号（例：12）", "終了列番号", "12")))
+    tiers = CLng(Val(InputBox("段数（例：12）", "段数", "12")))
+
+    If startNo <= 0 Or endNo <= 0 Or tiers <= 0 Then
+        MsgBox "開始列番号・終了列番号・段数は 1 以上で入力してください。", vbExclamation
+        Exit Sub
+    End If
+    If startNo > endNo Then
+        MsgBox "開始列番号が終了列番号より大きいです。", vbExclamation
+        Exit Sub
+    End If
+
+    Dim hasTenbukuro As Boolean
+    hasTenbukuro = (MsgBox("天袋はありますか？", vbQuestion Or vbYesNo, "天袋") = vbYes)
+
+    Dim sheetName As String
+    sheetName = SafeSheetName(lockerName)
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+
+    Dim ws As Worksheet
+    Set ws = GetOrCreateWorksheet(wb, sheetName)
+    ws.Cells.Clear
+
+    '----------------------------
+    ' 表の開始位置（1行下＆1列右）
+    '----------------------------
+    Dim titleRow As Long: titleRow = 1
+    Dim titleCol As Long: titleCol = 1 ' A1 にロッカー名
+
+    Dim headerRow As Long: headerRow = 2
+    Dim leftCol As Long: leftCol = 2   ' B2 が表左上（段ヘッダー）
+
+    Dim colsCount As Long
+    colsCount = (endNo - startNo + 1)  ' ロッカー番号の列数
+
+    ' 天袋がある場合、段行の前に1行追加
+    Dim extraTopRow As Long
+    extraTopRow = IIf(hasTenbukuro, 1, 0)
+
+    Dim lastRow As Long: lastRow = headerRow + tiers + extraTopRow
+    Dim lastCol As Long: lastCol = leftCol + colsCount ' B + colsCount → 最終列
+
+    '----------------------------
+    ' タイトル（A1 にロッカー名、横に結合）
+    '----------------------------
+    ws.Cells(titleRow, titleCol).Value = lockerName
+    With ws.Range(ws.Cells(titleRow, titleCol), ws.Cells(titleRow, lastCol))
+        .Merge
+        .Font.name = "メイリオ"
+        .Font.Size = 10
+        .Font.Bold = True
+        .HorizontalAlignment = xlLeft
+        .VerticalAlignment = xlCenter
+    End With
+    ws.Rows(titleRow).RowHeight = 22
+
+    '----------------------------
+    ' ヘッダー（B2="段"、C2～がロッカー番号）
+    '----------------------------
+    ws.Cells(headerRow, leftCol).Value = "段"
+
+    Dim n As Long, c As Long
+    c = leftCol + 1 ' C
+    For n = startNo To endNo
+        ws.Cells(headerRow, c).Value = n
+        c = c + 1
+    Next n
+
+    '----------------------------
+    ' 天袋行（B3="天袋"） ※ある場合のみ
+    '----------------------------
+    Dim tenRow As Long
+    tenRow = headerRow + 1 ' 3
+
+    If hasTenbukuro Then
+        ws.Cells(tenRow, leftCol).Value = "天袋"
+        ' 天袋行は見分けやすく薄い黄色
+        With ws.Range(ws.Cells(tenRow, leftCol), ws.Cells(tenRow, lastCol))
+            .Font.Bold = True
+            .HorizontalAlignment = xlCenter
+            .Interior.Color = RGB(255, 242, 204) ' 薄い黄色
+        End With
+    End If
+
+    '----------------------------
+    ' 段番号（B列）※天袋がある場合は 1段目は4行目から
+    '----------------------------
+    Dim firstTierRow As Long
+    firstTierRow = headerRow + 1 + extraTopRow
+
+    Dim r As Long
+    For r = 1 To tiers
+        ws.Cells(headerRow + r + extraTopRow, leftCol).Value = r & "段"
+    Next r
+
+    '----------------------------
+    ' 表範囲（B2～）
+    '----------------------------
+    Dim tbl As Range
+    Set tbl = ws.Range(ws.Cells(headerRow, leftCol), ws.Cells(lastRow, lastCol))
+
+    ' フォント（表全体）
+    With tbl
+        .Font.name = "メイリオ"
+        .Font.Size = 10
+        .VerticalAlignment = xlCenter
+    End With
+
+    ' ヘッダー行（2行目）の塗りつぶし
+    With ws.Range(ws.Cells(headerRow, leftCol), ws.Cells(headerRow, lastCol))
+        .Font.Bold = True
+        .HorizontalAlignment = xlCenter
+        .Interior.Color = RGB(230, 230, 230)
+    End With
+
+    ' 段列（段の行だけ）塗りつぶし（天袋がある場合は天袋行を除外）
+    With ws.Range(ws.Cells(firstTierRow, leftCol), ws.Cells(lastRow, leftCol))
+        .Font.Bold = True
+        .HorizontalAlignment = xlCenter
+        .Interior.Color = RGB(245, 245, 245)
+    End With
+
+    ' 入力升目（C3～）は中央寄せ
+    ws.Range(ws.Cells(headerRow + 1, leftCol + 1), ws.Cells(lastRow, lastCol)).HorizontalAlignment = xlCenter
+
+    '----------------------------
+    ' 列幅・行高（A列は余白、B列が段、C～がロッカー）
+    '----------------------------
+    ws.Columns("A").ColumnWidth = 2.5
+    ws.Columns(leftCol).ColumnWidth = 6 ' B
+
+    Dim j As Long
+    For j = leftCol + 1 To lastCol
+        ws.Columns(j).ColumnWidth = 10
+    Next j
+
+    ws.Rows(headerRow).RowHeight = 20
+    For r = headerRow + 1 To lastRow
+        ws.Rows(r).RowHeight = 22
+    Next r
+
+    '----------------------------
+    ' 罫線（内側細・外枠太）
+    '----------------------------
+    With tbl.Borders
+        .LineStyle = xlContinuous
+        .Weight = xlThin
+    End With
+    tbl.Borders(xlEdgeLeft).Weight = xlMedium
+    tbl.Borders(xlEdgeTop).Weight = xlMedium
+    tbl.Borders(xlEdgeRight).Weight = xlMedium
+    tbl.Borders(xlEdgeBottom).Weight = xlMedium
+
+    '----------------------------
+    ' フリーズ（タイトル＋ヘッダー＋段列を固定 → C3 を基点）
+    '----------------------------
+    ws.Activate
+    ws.Cells(headerRow + 1, leftCol + 1).Select ' C3
+    With ActiveWindow
+        .FreezePanes = False
+        .FreezePanes = True
+    End With
+
+    '----------------------------
+    ' 印刷設定（A4 1枚、A1 が左上に印字される）
+    '----------------------------
+    SetupA4Print ws, colsCount, ws.Range(ws.Cells(1, 1), ws.Cells(lastRow, lastCol)), headerRow
+
+    ' 管理シートに登録（プルダウン適用対象）
+    RegisterLockerSheet wb, ws.name
+
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+
+    MsgBox "ロッカーシートを作成しました：" & ws.name, vbInformation
+End Sub
+
+
+' ② 作成済み全ロッカー升目にプルダウン適用（名簿!A列）
+Public Sub ApplyDropdownToAllLockers()
+    Dim wb As Workbook: Set wb = TargetWB()
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+
+    ' 名簿シート準備
+    Dim wsRoster As Worksheet
+    Set wsRoster = EnsureRosterSheet(wb)
+
+    ' 名簿A列（A2～最終）を名前定義にする
+    Dim listRng As Range
+    Set listRng = GetRosterListRange(wsRoster)
+    CreateOrReplaceName wb, "RosterNames", listRng
+
+    ' ロッカー一覧から順に適用
+    Dim idx As Worksheet
+    Set idx = EnsureIndexSheet(wb)
+
+    Dim last As Long
+    last = idx.Cells(idx.Rows.Count, "A").End(xlUp).Row
+    If last < 2 Then
+        MsgBox "ロッカーが登録されていません。先にロッカー生成を実行してください。", vbExclamation
+        GoTo CleanUp
+    End If
+
+    Dim i As Long
+    For i = 2 To last
+        Dim shName As String
+        shName = Trim$(CStr(idx.Cells(i, "A").Value))
+        If Len(shName) = 0 Then GoTo ContinueLoop
+
+        Dim ws As Worksheet
+        On Error Resume Next
+        Set ws = wb.Worksheets(shName)
+        On Error GoTo 0
+        If ws Is Nothing Then GoTo ContinueLoop
+
+        Dim grid As Range
+        If GetLockerGridRange(ws, grid) Then
+            ApplyValidationToRange grid, "=RosterNames"
+        End If
+
+ContinueLoop:
+        Set ws = Nothing
+    Next i
+
+    MsgBox "プルダウンを適用しました。" & vbCrLf & _
+           "※同一ロッカー内で同名が重複するとエラー（選択セルがクリア）になります。", vbInformation
+
+CleanUp:
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+End Sub
+
+
+'============================================================
+' 以降はユーティリティ（全部 Private）
+'============================================================
+
+Private Function TargetWB() As Workbook
+    ' このブック運用前提（PERSONAL誤爆防止）
+    Set TargetWB = ThisWorkbook
+End Function
+
+Private Function SafeSheetName(ByVal s As String) As String
+    Dim t As String
+    t = Trim$(s)
+    t = Replace(t, ":", "：")
+    t = Replace(t, "/", "／")
+    t = Replace(t, "\", "＼")
+    t = Replace(t, "?", "？")
+    t = Replace(t, "*", "＊")
+    t = Replace(t, "[", "［")
+    t = Replace(t, "]", "］")
+    If Len(t) > 31 Then t = Left$(t, 31)
+    SafeSheetName = t
+End Function
+
+Private Function GetOrCreateWorksheet(ByVal wb As Workbook, ByVal sheetName As String) As Worksheet
+    If wb.ProtectStructure Then
+        Err.Raise vbObjectError + 1000, "GetOrCreateWorksheet", _
+                  "ブック構造が保護されています。 [校閲]→[ブックの保護] を解除してください。"
+    End If
+
+    On Error Resume Next
+    Set GetOrCreateWorksheet = wb.Worksheets(sheetName)
+    On Error GoTo 0
+
+    If GetOrCreateWorksheet Is Nothing Then
+        Dim Sh As Object
+        On Error Resume Next
+        Set Sh = wb.Sheets(sheetName)
+        On Error GoTo 0
+        If Not Sh Is Nothing Then
+            Err.Raise vbObjectError + 1001, "GetOrCreateWorksheet", _
+                      "同名のシート（ワークシート以外）が既に存在します: " & sheetName
+        End If
+
+        Set GetOrCreateWorksheet = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        GetOrCreateWorksheet.name = sheetName
+    End If
+End Function
+
+Private Function EnsureIndexSheet(ByVal wb As Workbook) As Worksheet
+    Set EnsureIndexSheet = GetOrCreateWorksheet(wb, INDEX_SHEET)
+    With EnsureIndexSheet
+        If .Range("A1").Value = "" Then .Range("A1").Value = "LockerSheets"
+        .Columns("A").ColumnWidth = 30
+        On Error Resume Next
+        .Visible = xlSheetVeryHidden
+        On Error GoTo 0
+    End With
+End Function
+
+Private Function EnsureRosterSheet(ByVal wb As Workbook) As Worksheet
+    Set EnsureRosterSheet = GetOrCreateWorksheet(wb, ROSTER_SHEET)
+    With EnsureRosterSheet
+        .Range("A1").Value = "氏名（A2以降に入力）"
+        .Columns("A").ColumnWidth = 30
+        With .Range("A1:A2000")
+            .Font.name = "メイリオ"
+            .Font.Size = 10
+        End With
+        .Range("A1").Font.Bold = True
+        .Range("A1").Interior.Color = RGB(230, 230, 230)
+    End With
+End Function
+
+Private Sub RegisterLockerSheet(ByVal wb As Workbook, ByVal sheetName As String)
+    Dim idx As Worksheet
+    Set idx = EnsureIndexSheet(wb)
+
+    Dim last As Long
+    last = idx.Cells(idx.Rows.Count, "A").End(xlUp).Row
+    If last < 1 Then last = 1
+
+    Dim r As Long
+    For r = 2 To last
+        If StrComp(CStr(idx.Cells(r, "A").Value), sheetName, vbTextCompare) = 0 Then Exit Sub
+    Next r
+
+    idx.Cells(last + 1, "A").Value = sheetName
+End Sub
+
+Private Function GetRosterListRange(ByVal ws As Worksheet) As Range
+    Dim last As Long
+    last = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    If last < 2 Then last = 2
+    Set GetRosterListRange = ws.Range("A2:A" & last)
+End Function
+
+Private Sub CreateOrReplaceName(ByVal wb As Workbook, ByVal nm As String, ByVal rng As Range)
+    On Error Resume Next
+    wb.Names(nm).Delete
+    On Error GoTo 0
+    wb.Names.Add name:=nm, RefersTo:=rng
+End Sub
+
+' 入力升目（C3～最終）を返す
+' 生成シート判定は B2="段"
+Private Function GetLockerGridRange(ByVal ws As Worksheet, ByRef grid As Range) As Boolean
+    On Error GoTo EH
+
+    If CStr(ws.Cells(2, 2).Value) <> "段" Then
+        GetLockerGridRange = False
+        Exit Function
+    End If
+
+    Dim lastRow As Long, lastCol As Long
+    lastRow = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row              ' B列（段/天袋）
+    lastCol = ws.Cells(2, ws.Columns.Count).End(xlToLeft).Column    ' 2行目（ヘッダー）
+
+    If lastRow < 3 Or lastCol < 3 Then
+        GetLockerGridRange = False
+        Exit Function
+    End If
+
+    Set grid = ws.Range(ws.Cells(3, 3), ws.Cells(lastRow, lastCol)) ' C3～
+    GetLockerGridRange = True
+    Exit Function
+
+EH:
+    GetLockerGridRange = False
+End Function
+
+Private Sub ApplyValidationToRange(ByVal rng As Range, ByVal formula1 As String)
+    On Error Resume Next
+    rng.Validation.Delete
+    On Error GoTo 0
+
+    With rng.Validation
+        .Add Type:=xlValidateList, AlertStyle:=xlValidAlertStop, Operator:=xlBetween, formula1:=formula1
+        .IgnoreBlank = True
+        .InCellDropdown = True
+        .ShowInput = True
+        .ShowError = True
+        .ErrorTitle = "入力エラー"
+        .ErrorMessage = "名簿のリストから選択してください。"
+    End With
+
+    rng.HorizontalAlignment = xlCenter
+End Sub
+
+' A4 1枚印刷：A1含む範囲を印刷
+Private Sub SetupA4Print(ByVal ws As Worksheet, ByVal colsCount As Long, ByVal printRng As Range, ByVal headerRow As Long)
+    With ws.PageSetup
+        .PaperSize = xlPaperA4
+        .Orientation = IIf(colsCount >= 6, xlLandscape, xlPortrait)
+
+        .Zoom = False
+        .FitToPagesWide = 1
+        .FitToPagesTall = 1
+
+        .CenterHorizontally = True
+        .CenterVertically = False
+
+        .LeftMargin = Application.CentimetersToPoints(1)
+        .RightMargin = Application.CentimetersToPoints(1)
+        .TopMargin = Application.CentimetersToPoints(1)
+        .BottomMargin = Application.CentimetersToPoints(1)
+
+        .PrintArea = printRng.Address
+        .PrintTitleRows = "$" & headerRow & ":$" & headerRow
+
+        ' A1 を印字するのでヘッダーは使わない
+        .LeftHeader = ""
+        .CenterHeader = ""
+        .RightHeader = ""
+    End With
+End Sub
+
+
