@@ -1,0 +1,83 @@
+Option Explicit
+
+Private Sub Workbook_SheetChange(ByVal Sh As Object, ByVal Target As Range)
+    On Error GoTo ExitHandler
+
+    If Not IsLockerSheet(CStr(Sh.name)) Then Exit Sub
+
+    Dim grid As Range
+    If Not GetLockerGridRange(Sh, grid) Then Exit Sub
+
+    Dim hit As Range
+    Set hit = Intersect(Target, grid)
+    If hit Is Nothing Then Exit Sub
+
+    Application.EnableEvents = False
+
+    Dim c As Range
+    For Each c In hit.Cells
+        If Len(CStr(c.Value)) > 0 Then
+            If Application.WorksheetFunction.CountIf(grid, c.Value) > 1 Then
+                MsgBox "同一ロッカー内で同じ名前が複数選択されています：" & vbCrLf & CStr(c.Value), vbExclamation
+                c.ClearContents
+            End If
+        End If
+    Next c
+
+ExitHandler:
+    Application.EnableEvents = True
+End Sub
+
+Private Function IsLockerSheet(ByVal sheetName As String) As Boolean
+    On Error GoTo EH
+
+    Dim idx As Worksheet
+    Set idx = ThisWorkbook.Worksheets(INDEX_SHEET)
+
+    Dim last As Long, r As Long
+    last = idx.Cells(idx.Rows.Count, "A").End(xlUp).Row
+    If last < 2 Then
+        IsLockerSheet = False
+        Exit Function
+    End If
+
+    For r = 2 To last
+        If StrComp(CStr(idx.Cells(r, "A").Value), sheetName, vbTextCompare) = 0 Then
+            IsLockerSheet = True
+            Exit Function
+        End If
+    Next r
+
+    IsLockerSheet = False
+    Exit Function
+
+EH:
+    IsLockerSheet = False
+End Function
+
+' 入力升目（C3～最終）取得：B2="段" を目印
+Private Function GetLockerGridRange(ByVal ws As Worksheet, ByRef grid As Range) As Boolean
+    On Error GoTo EH
+
+    If CStr(ws.Cells(2, 2).Value) <> "段" Then
+        GetLockerGridRange = False
+        Exit Function
+    End If
+
+    Dim lastRow As Long, lastCol As Long
+    lastRow = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row
+    lastCol = ws.Cells(2, ws.Columns.Count).End(xlToLeft).Column
+
+    If lastRow < 3 Or lastCol < 3 Then
+        GetLockerGridRange = False
+        Exit Function
+    End If
+
+    Set grid = ws.Range(ws.Cells(3, 3), ws.Cells(lastRow, lastCol)) ' C3～
+    GetLockerGridRange = True
+    Exit Function
+
+EH:
+    GetLockerGridRange = False
+End Function
+
