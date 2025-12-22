@@ -3,7 +3,7 @@ Option Explicit
 '============================================================
 ' メイン：設定 + 座席名ユニーク化（1マクロで完結）
 ' - 入力：C列（氏名）
-' - 出力：D列（座席名＝旧表示名を上書き）
+' - 出力：D列（座席名）を上書き
 '============================================================
 Public Sub MakeUniqueDisplayNames()
     Dim ws As Worksheet
@@ -30,9 +30,9 @@ CleanUp:
 End Sub
 
 '============================================================
-' カウント：特技懇（H列）が「〇」の人数 / 全体人数
+' カウント：特技懇（I列）が「〇」の人数 / 全体人数
 ' - 全体人数：C列（氏名）が空でない行数
-' - 特技懇〇：C列が空でなく、かつ H列が「〇」（または「○」）の行数
+' - 特技懇〇：C列が空でなく、かつ I列が「〇」（または「○」）の行数
 '============================================================
 Public Sub CountTokugikon()
     Dim ws As Worksheet
@@ -56,7 +56,7 @@ Public Sub CountTokugikon()
             total = total + 1
 
             Dim tokugi As String
-            tokugi = NormalizeCellText(ws.Cells(i, "H").Value)
+            tokugi = NormalizeCellText(ws.Cells(i, "I").Value)
 
             If tokugi = "〇" Or tokugi = "○" Then
                 yesCnt = yesCnt + 1
@@ -69,7 +69,7 @@ Public Sub CountTokugikon()
 End Sub
 
 '============================================================
-' シートの体裁を整える（B～H）
+' シートの体裁を整える（B～I）
 '============================================================
 Private Sub SetupSheetFormatting(ByVal ws As Worksheet)
     Dim lastRow As Long
@@ -77,15 +77,16 @@ Private Sub SetupSheetFormatting(ByVal ws As Worksheet)
     If lastRow < 2 Then lastRow = 2
 
     '----------------------------
-    ' ヘッダー（B～H）
+    ' ヘッダー（B～I）
     '----------------------------
     ws.Range("B1").Value = "審査官コード"
     ws.Range("C1").Value = "氏名"
-    ws.Range("D1").Value = "座席名（旧表示名）"
+    ws.Range("D1").Value = "座席名"
     ws.Range("E1").Value = "役職"
-    ws.Range("F1").Value = "グループ"
-    ws.Range("G1").Value = "メールアドレス"
-    ws.Range("H1").Value = "特技懇"
+    ws.Range("F1").Value = "所属"
+    ws.Range("G1").Value = "グループ"
+    ws.Range("H1").Value = "メールアドレス"
+    ws.Range("I1").Value = "特技懇"
 
     '----------------------------
     ' D列（座席名）を一旦クリア（※上書き運用）
@@ -95,7 +96,7 @@ Private Sub SetupSheetFormatting(ByVal ws As Worksheet)
     '----------------------------
     ' フォント（メイリオ 10pt）
     '----------------------------
-    With ws.Range("B:H")
+    With ws.Range("B:I")
         .Font.Name = "メイリオ"
         .Font.Size = 10
     End With
@@ -103,7 +104,7 @@ Private Sub SetupSheetFormatting(ByVal ws As Worksheet)
     '----------------------------
     ' ヘッダーの見た目
     '----------------------------
-    With ws.Range("B1:H1")
+    With ws.Range("B1:I1")
         .Font.Bold = True
         .Interior.Color = RGB(230, 230, 230) ' 薄いグレー
         .HorizontalAlignment = xlCenter
@@ -111,38 +112,38 @@ Private Sub SetupSheetFormatting(ByVal ws As Worksheet)
     End With
 
     '----------------------------
-    ' フィルター（B～Hすべて）
+    ' フィルター（B～Iすべて）
     '----------------------------
     If ws.AutoFilterMode Then ws.AutoFilterMode = False
-    ws.Range("B1:H" & lastRow).AutoFilter
+    ws.Range("B1:I" & lastRow).AutoFilter
 
     '----------------------------
-    ' H列：特技懇（〇/×）ドロップダウン
+    ' I列：特技懇（〇/×）ドロップダウン
     '----------------------------
     ApplyTokugikonDropdown ws, lastRow
 
     '----------------------------
-    ' 枠線（B～H）
+    ' 枠線（B～I）
     '----------------------------
-    With ws.Range("B1:H" & lastRow).Borders
+    With ws.Range("B1:I" & lastRow).Borders
         .LineStyle = xlContinuous
         .Weight = xlThin
     End With
 
     '----------------------------
-    ' 列幅（見やすい固定 + 必要ならAutoFit）
+    ' 列幅（見やすい固定）
     '----------------------------
     ws.Columns("B").ColumnWidth = 12   ' 審査官コード
     ws.Columns("C").ColumnWidth = 14   ' 氏名
     ws.Columns("D").ColumnWidth = 18   ' 座席名
     ws.Columns("E").ColumnWidth = 10   ' 役職
-    ws.Columns("F").ColumnWidth = 12   ' グループ
-    ws.Columns("G").ColumnWidth = 28   ' メール
-    ws.Columns("H").ColumnWidth = 8    ' 特技懇
+    ws.Columns("F").ColumnWidth = 12   ' 所属
+    ws.Columns("G").ColumnWidth = 12   ' グループ
+    ws.Columns("H").ColumnWidth = 28   ' メールアドレス
+    ws.Columns("I").ColumnWidth = 8    ' 特技懇
 
     '----------------------------
     ' 1行目固定（ヘッダー固定表示）
-    ' ※ActiveWindowを使うため ws をアクティブ化
     '----------------------------
     ws.Activate
     With ActiveWindow
@@ -203,7 +204,6 @@ End Sub
 
 '============================================================
 ' 氏名文字列を「苗字」「名前」に分解
-' - 全角スペースは半角へ寄せ、Trim で余分な空白を潰す
 '============================================================
 Private Sub ParseFullName(ByVal s As String, ByRef sei As String, ByRef mei As String)
     Dim t As String
@@ -219,7 +219,6 @@ Private Sub ParseFullName(ByVal s As String, ByRef sei As String, ByRef mei As S
         sei = Left$(t, p - 1)
         mei = Mid$(t, p + 1)
     Else
-        ' スペースが無い場合は全部苗字扱い（名前は空）
         sei = t
         mei = ""
     End If
@@ -227,9 +226,6 @@ End Sub
 
 '============================================================
 ' ユニークな座席名を作る
-' - 苗字がユニーク：苗字のみ
-' - 苗字が重複：苗字(名前の先頭1文字) を基本に、重複したら先頭2文字…と伸ばす
-' - それでも重複（同名など）：連番を付けて必ずユニーク化
 '============================================================
 Private Function MakeUniqueLabel( _
     ByVal sei As String, _
@@ -247,15 +243,12 @@ Private Function MakeUniqueLabel( _
             MakeUniqueLabel = candidate
             Exit Function
         End If
-        ' 万一ぶつかったら連番
         MakeUniqueLabel = MakeWithSerial(sei, dictUsed)
         Exit Function
     End If
 
-    ' 苗字が重複している場合
     Dim k As Long
     If Len(mei) = 0 Then
-        ' 名前が取れない場合は連番でユニーク化
         MakeUniqueLabel = MakeWithSerial(sei, dictUsed)
         Exit Function
     End If
@@ -269,7 +262,6 @@ Private Function MakeUniqueLabel( _
         End If
     Next k
 
-    ' ここまで来るのは「同姓同名」などで全プレフィックスが衝突したとき
     Dim n As Long: n = 2
     Do
         candidate = sei & "(" & mei & CStr(n) & ")"
@@ -307,13 +299,12 @@ Private Function MakeWithSerial(ByVal base As String, ByVal dictUsed As Object) 
 End Function
 
 '============================================================
-' H列（特技懇）に「〇/×」の入力規則（ドロップダウン）を設定
+' I列（特技懇）に「〇/×」の入力規則（ドロップダウン）を設定
 '============================================================
 Private Sub ApplyTokugikonDropdown(ByVal ws As Worksheet, ByVal lastRow As Long)
     Dim rng As Range
-    Set rng = ws.Range("H2:H" & lastRow)
+    Set rng = ws.Range("I2:I" & lastRow)
 
-    ' 既存の入力規則を消してから再設定
     On Error Resume Next
     rng.Validation.Delete
     On Error GoTo 0
@@ -332,21 +323,25 @@ Private Sub ApplyTokugikonDropdown(ByVal ws As Worksheet, ByVal lastRow As Long)
         .ErrorMessage = "特技懇は「〇」または「×」を選択してください。"
     End With
 
-    ' 見た目（中央寄せ）
     rng.HorizontalAlignment = xlCenter
 End Sub
 
 '============================================================
-' 最終行取得（B～Hのどこかにデータがある前提で最大を取る）
+' 最終行取得（B～Iの最大）
 '============================================================
 Private Function GetLastRow(ByVal ws As Worksheet) As Long
-    Dim rB As Long, rC As Long, rH As Long
+    Dim cols As Variant
+    cols = Array("B", "C", "D", "E", "F", "G", "H", "I")
 
-    rB = ws.Cells(ws.Rows.Count, "B").End(xlUp).Row
-    rC = ws.Cells(ws.Rows.Count, "C").End(xlUp).Row
-    rH = ws.Cells(ws.Rows.Count, "H").End(xlUp).Row
+    Dim i As Long, r As Long, mx As Long
+    mx = 2
 
-    GetLastRow = Application.WorksheetFunction.Max(2, rB, rC, rH)
+    For i = LBound(cols) To UBound(cols)
+        r = ws.Cells(ws.Rows.Count, CStr(cols(i))).End(xlUp).Row
+        If r > mx Then mx = r
+    Next i
+
+    GetLastRow = mx
 End Function
 
 '============================================================
@@ -355,7 +350,7 @@ End Function
 Private Function NormalizeCellText(ByVal v As Variant) As String
     Dim t As String
     t = CStr(v)
-    t = Replace(t, ChrW(&H3000), " ") ' 全角スペース→半角スペース
+    t = Replace(t, ChrW(&H3000), " ")
     On Error Resume Next
     t = Application.WorksheetFunction.Trim(t)
     On Error GoTo 0
