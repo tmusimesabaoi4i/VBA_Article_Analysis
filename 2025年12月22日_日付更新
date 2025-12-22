@@ -1,11 +1,71 @@
 Option Explicit
 
 '============================================================
-' A列の絶対パスのファイルについて、最終更新日時だけを「今」に更新する
-' - 内容は変更しない（Windows API: SetFileTime を使用）
-' - 結果をB列に出力
+' A列：絶対パス
+' B列：結果（OK / NG）
+' 目的：ファイル内容は変更せず、最終更新日時(LastWriteTime)だけを「今」にする
+' 追加：フォントをメイリオ10ptに設定
+'============================================================
+
+'======================
+' Windows API 宣言部（32/64 両対応 + Unicodeパス対応）
+'======================
+#If VBA7 Then
+
+Private Type FILETIME
+    dwLowDateTime  As Long
+    dwHighDateTime As Long
+End Type
+
+Private Const FILE_WRITE_ATTRIBUTES As Long = &H100
+Private Const FILE_SHARE_READ  As Long = &H1
+Private Const FILE_SHARE_WRITE As Long = &H2
+Private Const FILE_SHARE_DELETE As Long = &H4
+
+Private Const OPEN_EXISTING As Long = 3
+Private Const FILE_ATTRIBUTE_NORMAL As Long = &H80
+
+Private Const INVALID_HANDLE_VALUE As LongPtr = -1
+Private Const INVALID_FILE_ATTRIBUTES As Long = -1
+Private Const FILE_ATTRIBUTE_DIRECTORY As Long = &H10
+
+Private Declare PtrSafe Function CreateFileW Lib "kernel32" ( _
+    ByVal lpFileName As LongPtr, _
+    ByVal dwDesiredAccess As Long, _
+    ByVal dwShareMode As Long, _
+    ByVal lpSecurityAttributes As LongPtr, _
+    ByVal dwCreationDisposition As Long, _
+    ByVal dwFlagsAndAttributes As Long, _
+    ByVal hTemplateFile As LongPtr _
+) As LongPtr
+
+Private Declare PtrSafe Function SetFileTime Lib "kernel32" ( _
+    ByVal hFile As LongPtr, _
+    ByVal lpCreationTime As LongPtr, _
+    ByVal lpLastAccessTime As LongPtr, _
+    ByRef lpLastWriteTime As FILETIME _
+) As Long
+
+Private Declare PtrSafe Function CloseHandle Lib "kernel32" ( _
+    ByVal hObject As LongPtr _
+) As Long
+
+Private Declare PtrSafe Sub GetSystemTimeAsFileTime Lib "kernel32" ( _
+    ByRef lpSystemTimeAsFileTime As FILETIME _
+)
+
+Private Declare PtrSafe Function GetFileAttributesW Lib "kernel32" ( _
+    ByVal lpFileName As LongPtr _
+) As Long
+
+#End If
+
+
+'============================================================
+' 実行マクロ：A列のパスを順に処理して更新日時を最新化
 '============================================================
 Public Sub TouchFilesFromColA()
+#If VBA7 Then
     Dim ws As Worksheet
     Set ws = ActiveSheet
 
@@ -19,29 +79,65 @@ Public Sub TouchFilesFromColA()
     Application.ScreenUpdating = False
     Application.EnableEvents = False
 
+    '----------------------------
+    ' 見た目：フォント（メイリオ10pt）
+    '----------------------------
+    ApplyFontMeiryo10 ws, lastRow
+
+    ' ヘッダー（任意：既にあるなら上書きされます）
+    ws.Range("A1").Value = "絶対パス"
+    ws.Range("B1").Value = "結果"
+
+    With ws.Range("A1:B1")
+        .Font.Bold = True
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+        .Interior.Color = RGB(230, 230, 230)
+    End With
+
+    ' フィルター（A:B）
+    If ws.AutoFilterMode Then ws.AutoFilterMode = False
+    ws.Range("A1:B" & Application.WorksheetFunction.Max(2, lastRow)).AutoFilter
+
+    ' 1行目固定（ヘッダー固定表示）
+    ws.Activate
+    With ActiveWindow
+        .SplitRow = 1
+        .SplitColumn = 0
+        .FreezePanes = True
+    End With
+
     Dim r As Long
     Dim p As String
     Dim ok As Boolean
+    Dim msg As String
 
     Dim cntOK As Long, cntNG As Long, cntSkip As Long
 
-    For r = 1 To lastRow
-        p = Trim$(CStr(ws.Cells(r, "A").Value))
+    ' データ開始行は 2 行目想定（1行目はヘッダー）
+    For r = 2 To lastRow
+        p = NormalizePathText(ws.Cells(r, "A").Value)
 
         If Len(p) = 0 Then
             ws.Cells(r, "B").Value = "SKIP: 空"
             cntSkip = cntSkip + 1
         Else
-            ok = TouchOneFile_LastWriteTimeToNow(p)
+            msg = ""
+            ok = TouchOneFile_LastWriteTimeToNow(p, msg)
+
             If ok Then
                 ws.Cells(r, "B").Value = "OK"
                 cntOK = cntOK + 1
             Else
-                ws.Cells(r, "B").Value = "NG: 更新失敗/存在しない/アクセス不可"
+                If Len(msg) = 0 Then msg = "更新失敗/存在しない/アクセス不可"
+                ws.Cells(r, "B").Value = "NG: " & msg
                 cntNG = cntNG + 1
             End If
         End If
     Next r
+
+    ' 仕上げ
+    ws.Columns("A:B").AutoFit
 
     Application.EnableEvents = True
     Application.ScreenUpdating = True
@@ -50,28 +146,46 @@ Public Sub TouchFilesFromColA()
            "OK: " & cntOK & vbCrLf & _
            "NG: " & cntNG & vbCrLf & _
            "SKIP: " & cntSkip, vbInformation
+
+#Else
+    MsgBox "このマクロは Windows版 Excel（VBA7 / Office 2010以降）向けです。", vbExclamation
+#End If
 End Sub
+
 
 '============================================================
 ' 1ファイルの最終更新日時(LastWriteTime)を「今」に更新する
+' - 内容は変更しない（SetFileTimeで属性のみ変更）
 ' - 成功: True / 失敗: False
 '============================================================
-Private Function TouchOneFile_LastWriteTimeToNow(ByVal filePath As String) As Boolean
+Private Function TouchOneFile_LastWriteTimeToNow(ByVal filePath As String, ByRef errMsg As String) As Boolean
+#If VBA7 Then
     On Error GoTo EH
 
-    ' Dir で存在チェック（長いパスや特殊ケースはここで落ちることがある点に注意）
-    If Len(Dir$(filePath, vbNormal Or vbHidden Or vbSystem Or vbReadOnly Or vbArchive)) = 0 Then
+    Dim p As String
+    p = filePath
+
+    ' 念のため：長いパス対応（必要に応じて \\?\ を付与）
+    p = NormalizeLongPath(p)
+
+    ' 存在・フォルダ判定（フォルダは対象外）
+    Dim attr As Long
+    attr = GetFileAttributesW(StrPtr(p))
+    If attr = INVALID_FILE_ATTRIBUTES Then
+        errMsg = "見つかりません"
+        TouchOneFile_LastWriteTimeToNow = False
+        Exit Function
+    End If
+    If (attr And FILE_ATTRIBUTE_DIRECTORY) <> 0 Then
+        errMsg = "フォルダのため対象外"
         TouchOneFile_LastWriteTimeToNow = False
         Exit Function
     End If
 
+    ' 更新日時の変更に必要なハンドル取得（属性書き換え権限）
     Dim hFile As LongPtr
-    Dim ftNow As FILETIME
-    Dim ret As Long
-
-    ' 共有モードは読み書き削除を許可（開かれていても通る可能性を上げる）
-    hFile = CreateFileA( _
-        filePath, _
+    hFile = CreateFileW( _
+        StrPtr(p), _
         FILE_WRITE_ATTRIBUTES, _
         FILE_SHARE_READ Or FILE_SHARE_WRITE Or FILE_SHARE_DELETE, _
         0, _
@@ -81,62 +195,96 @@ Private Function TouchOneFile_LastWriteTimeToNow(ByVal filePath As String) As Bo
     )
 
     If hFile = INVALID_HANDLE_VALUE Then
+        errMsg = "開けません（権限/共有/パス）"
         TouchOneFile_LastWriteTimeToNow = False
         Exit Function
     End If
 
-    ' 現在時刻(UTC)を FILETIME で取得し、最終更新日時に設定
+    ' 現在時刻(UTC)を FILETIME で取得 → 最終更新日時へ設定
+    Dim ftNow As FILETIME
     GetSystemTimeAsFileTime ftNow
 
-    ' 作成日時/最終アクセス日時は変更しない（NULLを渡す）
-    ret = SetFileTime(hFile, ByVal 0&, ByVal 0&, ftNow)
+    ' 作成日時/アクセス日時は変更しない（0を渡す）
+    Dim ret As Long
+    ret = SetFileTime(hFile, 0, 0, ftNow)
 
     CloseHandle hFile
 
-    TouchOneFile_LastWriteTimeToNow = (ret <> 0)
+    If ret = 0 Then
+        errMsg = "SetFileTime失敗"
+        TouchOneFile_LastWriteTimeToNow = False
+    Else
+        TouchOneFile_LastWriteTimeToNow = True
+    End If
+
     Exit Function
 
 EH:
+    errMsg = "例外: " & Err.Description
     TouchOneFile_LastWriteTimeToNow = False
+#Else
+    errMsg = "VBA7未対応"
+    TouchOneFile_LastWriteTimeToNow = False
+#End If
 End Function
 
-'======================
-' Windows API 宣言部
-'======================
-Private Type FILETIME
-    dwLowDateTime  As Long
-    dwHighDateTime As Long
-End Type
 
-Private Const FILE_WRITE_ATTRIBUTES As Long = &H100
-Private Const FILE_SHARE_READ As Long = &H1
-Private Const FILE_SHARE_WRITE As Long = &H2
-Private Const FILE_SHARE_DELETE As Long = &H4
-Private Const OPEN_EXISTING As Long = 3
-Private Const FILE_ATTRIBUTE_NORMAL As Long = &H80
-Private Const INVALID_HANDLE_VALUE As LongPtr = -1
+'============================================================
+' 見た目：メイリオ 10pt を A:B（使う範囲）へ適用
+'============================================================
+Private Sub ApplyFontMeiryo10(ByVal ws As Worksheet, ByVal lastRow As Long)
+    Dim r As Long
+    r = Application.WorksheetFunction.Max(2, lastRow)
 
-Private Declare PtrSafe Function CreateFileA Lib "kernel32" ( _
-    ByVal lpFileName As String, _
-    ByVal dwDesiredAccess As Long, _
-    ByVal dwShareMode As Long, _
-    ByVal lpSecurityAttributes As LongPtr, _
-    ByVal dwCreationDisposition As Long, _
-    ByVal dwFlagsAndAttributes As Long, _
-    ByVal hTemplateFile As LongPtr _
-) As LongPtr
+    With ws.Range("A1:B" & r)
+        .Font.Name = "メイリオ"
+        .Font.Size = 10
+    End With
+End Sub
 
-Private Declare PtrSafe Function SetFileTime Lib "kernel32" ( _
-    ByVal hFile As LongPtr, _
-    lpCreationTime As Any, _
-    lpLastAccessTime As Any, _
-    lpLastWriteTime As Any _
-) As Long
 
-Private Declare PtrSafe Function CloseHandle Lib "kernel32" ( _
-    ByVal hObject As LongPtr _
-) As Long
+'============================================================
+' A列の値を文字列として整形（前後空白除去 / 全角空白→半角 / 連続空白をTrim）
+'============================================================
+Private Function NormalizePathText(ByVal v As Variant) As String
+    Dim t As String
+    t = CStr(v)
+    t = Replace(t, ChrW(&H3000), " ") ' 全角スペース→半角スペース
+    On Error Resume Next
+    t = Application.WorksheetFunction.Trim(t)
+    On Error GoTo 0
+    NormalizePathText = t
+End Function
 
-Private Declare PtrSafe Sub GetSystemTimeAsFileTime Lib "kernel32" ( _
-    lpSystemTimeAsFileTime As FILETIME _
-)
+
+'============================================================
+' 長いパス対応（必要に応じて \\?\ を付ける）
+' - 既に \\?\ の場合：そのまま
+' - UNC(\\server\share\...)：\\?\UNC\server\share\... へ
+' - 通常(C:\...)：\\?\C:\... へ
+'============================================================
+Private Function NormalizeLongPath(ByVal p As String) As String
+    Dim s As String
+    s = p
+
+    ' すでに付いているならそのまま
+    If Left$(s, 4) = "\\?\" Then
+        NormalizeLongPath = s
+        Exit Function
+    End If
+
+    ' 長さが十分短ければ付けない（付けても概ねOKだが、環境差を避ける）
+    If Len(s) < 240 Then
+        NormalizeLongPath = s
+        Exit Function
+    End If
+
+    ' UNC
+    If Left$(s, 2) = "\\" Then
+        NormalizeLongPath = "\\?\UNC\" & Mid$(s, 3)
+        Exit Function
+    End If
+
+    ' 通常ドライブパス
+    NormalizeLongPath = "\\?\" & s
+End Function
