@@ -4,26 +4,24 @@ Option Explicit
 ' A列：絶対パス（ファイル/フォルダ）
 ' B列：結果
 '
-' 要求仕様：
-' - パスが存在しない場合：SKIP（日時も触らない）
-' - 作成者(Author)の変更は可能なら行う（Office/PDF）
-' - 作成者(Author)の変更に失敗しても、Touch（日時更新）は必ず行う
-' - フォルダは Author を持たないので Author はSKIP、Touchは行う
-' - Owner は絶対に変更しない
-' - 見た目：メイリオ10pt
+' 仕様：
+' - パスが存在しない：SKIP（Touchしない）
+' - Author変更に失敗しても Touch（更新日時）は必ず行う
+' - フォルダは Author 対象外（SKIP）だが Touch は行う
+' - Owner は変更しない
 '============================================================
 
 #If VBA7 Then
 
-'----------------------
+'======================
 ' 設定
-'----------------------
+'======================
+Private Const EXIFTOOL_EXE As String = "exiftool"  ' PATHが通っていればOK。フルパスでもOK
 Private Const SET_LAST_AUTHOR_TOO As Boolean = True
-Private Const EXIFTOOL_EXE As String = "exiftool" ' PATHが通っていればOK（フルパスでも可）
 
-'----------------------
-' Windows API（ファイル/フォルダ時刻）
-'----------------------
+'======================
+' Windows API（時刻）
+'======================
 Private Type FILETIME
     dwLowDateTime  As Long
     dwHighDateTime As Long
@@ -31,9 +29,11 @@ End Type
 
 Private Const FILE_READ_ATTRIBUTES As Long = &H80
 Private Const FILE_WRITE_ATTRIBUTES As Long = &H100
+
 Private Const FILE_SHARE_READ  As Long = &H1
 Private Const FILE_SHARE_WRITE As Long = &H2
 Private Const FILE_SHARE_DELETE As Long = &H4
+
 Private Const OPEN_EXISTING As Long = 3
 Private Const FILE_ATTRIBUTE_NORMAL As Long = &H80
 Private Const FILE_ATTRIBUTE_DIRECTORY As Long = &H10
@@ -78,14 +78,11 @@ Private Declare PtrSafe Function GetFileAttributesW Lib "kernel32" ( _
     ByVal lpFileName As LongPtr _
 ) As Long
 
-#End If
-
 
 '============================================================
-' メイン：Author変更（可能なら）＋ Touch（必ず）
+' メイン
 '============================================================
 Public Sub FixAuthor_AndTouch_FromColA()
-#If VBA7 Then
     Dim ws As Worksheet: Set ws = ActiveSheet
 
     Dim lastRow As Long
@@ -96,11 +93,12 @@ Public Sub FixAuthor_AndTouch_FromColA()
     End If
 
     Dim newAuthor As String
-    newAuthor = Trim$(InputBox("設定したい作成者（Author）を入力してください。" & vbCrLf & _
-                               "（フォルダはAuthor対象外。存在しないパスはスキップ）", _
-                               "Author 一括変更（可能なら）＋ Touch（必ず）"))
-    ' Author空でもTouchだけしたいケースがあるので、空は許容
-    ' （空なら Author変更はスキップし、Touchのみ実施）
+    newAuthor = Trim$(InputBox( _
+        "設定したい作成者（Author）を入力してください。" & vbCrLf & _
+        "空なら Author変更はせず、Touch（日時更新）のみ行います。", _
+        "Author（可能なら）＋Touch（必ず）" _
+    ))
+    ' newAuthor が空でもTouchは実施
 
     Application.ScreenUpdating = False
     Application.EnableEvents = False
@@ -113,7 +111,10 @@ Public Sub FixAuthor_AndTouch_FromColA()
     ' .xlsm 安全対策：外部ブックを自動化で開く時はマクロ無効
     Dim oldAutoSec As Long
     oldAutoSec = GetExcelAutomationSecurity()
-    SetExcelAutomationSecurity 3 ' ForceDisable
+    SetExcelAutomationSecurity 3 ' msoAutomationSecurityForceDisable
+
+    Dim wdApp As Object ' Word.Application（必要時のみ生成）
+    Dim ppApp As Object ' PowerPoint.Application（必要時のみ生成）
 
     Dim cntOK As Long, cntNG As Long, cntSkip As Long
     Dim r As Long
@@ -137,7 +138,9 @@ Public Sub FixAuthor_AndTouch_FromColA()
         Dim isDir As Boolean
         isDir = IsDirectoryPath(p)
 
-        ' 1) まず Author を「可能なら」変更（失敗しても次へ）
+        '----------------------------
+        ' 1) Author変更（可能なら）
+        '----------------------------
         Dim authorTried As Boolean, authorOK As Boolean, authorMsg As String
         authorTried = False
         authorOK = True
@@ -145,47 +148,48 @@ Public Sub FixAuthor_AndTouch_FromColA()
 
         If Len(newAuthor) > 0 Then
             If isDir Then
-                authorTried = False ' フォルダは対象外
+                ' フォルダは Author を持たない
+                authorTried = False
             Else
                 Dim ext As String
                 ext = LCase$(GetExtension(p))
 
                 If IsAuthorSupportedExt(ext) Then
                     authorTried = True
-                    authorOK = SetAuthor_ByType(p, ext, newAuthor, authorMsg)
+                    authorOK = SetAuthor_ByType(p, ext, newAuthor, authorMsg, wdApp, ppApp)
                 Else
                     authorTried = False
                 End If
             End If
         End If
 
-        ' 2) Touch（日時更新）は「必ず」行う（フォルダも含む）
+        '----------------------------
+        ' 2) Touch（必ず）
+        '----------------------------
         Dim touchOK As Boolean, touchMsg As String
         touchMsg = ""
         touchOK = TouchLastWriteTimeToNow(p, touchMsg)
 
+        '----------------------------
         ' 3) 結果表示
+        '----------------------------
         Dim out As String
         out = ""
 
-        If isDir Then
-            out = out & "[DIR] "
-        End If
+        If isDir Then out = out & "[DIR] " Else out = out & "[FILE] "
 
-        If authorTried Then
+        If Len(newAuthor) = 0 Then
+            out = out & "Author=SKIP(未指定); "
+        ElseIf isDir Then
+            out = out & "Author=SKIP(フォルダ); "
+        ElseIf authorTried Then
             If authorOK Then
                 out = out & "Author=OK; "
             Else
                 out = out & "Author=NG(" & authorMsg & "); "
             End If
         Else
-            If Len(newAuthor) > 0 And isDir Then
-                out = out & "Author=SKIP(フォルダ); "
-            ElseIf Len(newAuthor) > 0 Then
-                out = out & "Author=SKIP(対象外拡張子); "
-            Else
-                out = out & "Author=SKIP(未指定); "
-            End If
+            out = out & "Author=SKIP(対象外拡張子); "
         End If
 
         If touchOK Then
@@ -196,7 +200,7 @@ Public Sub FixAuthor_AndTouch_FromColA()
 
         ws.Cells(r, "B").Value = out
 
-        ' 集計：Touch 成否をベースにする（Touchが目的のため）
+        ' 集計は Touch 基準
         If touchOK Then
             cntOK = cntOK + 1
         Else
@@ -206,10 +210,16 @@ Public Sub FixAuthor_AndTouch_FromColA()
 ContinueLoop:
     Next r
 
-    ws.Columns("A:B").AutoFit
+    ' 後始末（Word/PowerPoint）
+    On Error Resume Next
+    If Not wdApp Is Nothing Then wdApp.Quit
+    If Not ppApp Is Nothing Then ppApp.Quit
+    On Error GoTo 0
 
     ' AutomationSecurity を戻す
     SetExcelAutomationSecurity oldAutoSec
+
+    ws.Columns("A:B").AutoFit
 
     Application.DisplayAlerts = True
     Application.EnableEvents = True
@@ -219,17 +229,13 @@ ContinueLoop:
            "OK: " & cntOK & vbCrLf & _
            "NG: " & cntNG & vbCrLf & _
            "SKIP: " & cntSkip, vbInformation
-#Else
-    MsgBox "このマクロは Windows版 Excel（VBA7）向けです。", vbExclamation
-#End If
 End Sub
 
 
 '============================================================
-' Touch：最終更新日時(LastWriteTime)を「今」に（ファイル/フォルダ両対応）
+' Touch：最終更新日時を「今」に（ファイル/フォルダ両対応）
 '============================================================
 Private Function TouchLastWriteTimeToNow(ByVal path As String, ByRef errMsg As String) As Boolean
-#If VBA7 Then
     On Error GoTo EH
 
     Dim pApi As String
@@ -257,12 +263,6 @@ Private Function TouchLastWriteTimeToNow(ByVal path As String, ByRef errMsg As S
         Exit Function
     End If
 
-    ' 現在時刻
-    Dim ftNow As FILETIME
-    GetSystemTimeAsFileTime ftNow
-
-    ' Create/Access はそのまま、Writeだけ更新したいが SetFileTime は全部必要。
-    ' なので現在の Create/Access を取ってから Write を今にする。
     Dim ftC As FILETIME, ftA As FILETIME, ftW As FILETIME
     If GetFileTime(h, ftC, ftA, ftW) = 0 Then
         CloseHandle h
@@ -270,6 +270,9 @@ Private Function TouchLastWriteTimeToNow(ByVal path As String, ByRef errMsg As S
         TouchLastWriteTimeToNow = False
         Exit Function
     End If
+
+    Dim ftNow As FILETIME
+    GetSystemTimeAsFileTime ftNow
 
     Dim ret As Long
     ret = SetFileTime(h, ftC, ftA, ftNow)
@@ -287,29 +290,50 @@ Private Function TouchLastWriteTimeToNow(ByVal path As String, ByRef errMsg As S
 EH:
     errMsg = "例外: " & Err.Description
     TouchLastWriteTimeToNow = False
-#Else
-    errMsg = "VBA7未対応"
-    TouchLastWriteTimeToNow = False
-#End If
 End Function
 
 
 '============================================================
-' Author変更：拡張子別
+' Author変更：拡張子別（Office/PDF）
 '============================================================
-Private Function SetAuthor_ByType(ByVal fullPath As String, ByVal ext As String, ByVal newAuthor As String, ByRef errMsg As String) As Boolean
+Private Function SetAuthor_ByType( _
+    ByVal fullPath As String, _
+    ByVal ext As String, _
+    ByVal newAuthor As String, _
+    ByRef errMsg As String, _
+    ByRef wdApp As Object, _
+    ByRef ppApp As Object _
+) As Boolean
     On Error GoTo EH
 
     Select Case ext
         Case "xlsx", "xlsm", "xlsb", "xls"
             SetAuthor_ByType = SetAuthor_Excel(fullPath, newAuthor, errMsg)
             Exit Function
+
         Case "docx", "docm", "doc"
-            SetAuthor_ByType = SetAuthor_Word(fullPath, newAuthor, errMsg)
+            If wdApp Is Nothing Then
+                Set wdApp = CreateObject("Word.Application")
+                wdApp.Visible = False
+                On Error Resume Next
+                wdApp.DisplayAlerts = 0
+                wdApp.AutomationSecurity = 3
+                On Error GoTo 0
+            End If
+            SetAuthor_ByType = SetAuthor_Word(wdApp, fullPath, newAuthor, errMsg)
             Exit Function
+
         Case "pptx", "pptm", "ppt"
-            SetAuthor_ByType = SetAuthor_PowerPoint(fullPath, newAuthor, errMsg)
+            If ppApp Is Nothing Then
+                Set ppApp = CreateObject("PowerPoint.Application")
+                On Error Resume Next
+                ppApp.DisplayAlerts = 1
+                ppApp.AutomationSecurity = 3
+                On Error GoTo 0
+            End If
+            SetAuthor_ByType = SetAuthor_PowerPoint(ppApp, fullPath, newAuthor, errMsg)
             Exit Function
+
         Case "pdf"
             SetAuthor_ByType = SetAuthor_PDF_ExifTool(fullPath, newAuthor, errMsg)
             Exit Function
@@ -393,17 +417,10 @@ End Function
 '============================================================
 ' Word：Author変更（late binding）
 '============================================================
-Private Function SetAuthor_Word(ByVal path As String, ByVal newAuthor As String, ByRef errMsg As String) As Boolean
+Private Function SetAuthor_Word(ByVal wdApp As Object, ByVal path As String, ByVal newAuthor As String, ByRef errMsg As String) As Boolean
     On Error GoTo EH
 
-    Dim wdApp As Object, doc As Object
-    Set wdApp = CreateObject("Word.Application")
-    wdApp.Visible = False
-    On Error Resume Next
-    wdApp.DisplayAlerts = 0
-    wdApp.AutomationSecurity = 3 ' ForceDisable
-    On Error GoTo EH
-
+    Dim doc As Object
     Set doc = wdApp.Documents.Open(path, False, False, False, "", "", False)
 
     On Error Resume Next
@@ -414,7 +431,6 @@ Private Function SetAuthor_Word(ByVal path As String, ByVal newAuthor As String,
         Err.Clear
         On Error GoTo EH
         doc.Close False
-        wdApp.Quit
         SetAuthor_Word = False
         Exit Function
     End If
@@ -422,7 +438,6 @@ Private Function SetAuthor_Word(ByVal path As String, ByVal newAuthor As String,
 
     doc.Save
     doc.Close False
-    wdApp.Quit
 
     SetAuthor_Word = True
     Exit Function
@@ -431,7 +446,6 @@ EH:
     errMsg = "Word失敗: " & Err.Description
     On Error Resume Next
     If Not doc Is Nothing Then doc.Close False
-    If Not wdApp Is Nothing Then wdApp.Quit
     On Error GoTo 0
     SetAuthor_Word = False
 End Function
@@ -440,16 +454,10 @@ End Function
 '============================================================
 ' PowerPoint：Author変更（late binding）
 '============================================================
-Private Function SetAuthor_PowerPoint(ByVal path As String, ByVal newAuthor As String, ByRef errMsg As String) As Boolean
+Private Function SetAuthor_PowerPoint(ByVal ppApp As Object, ByVal path As String, ByVal newAuthor As String, ByRef errMsg As String) As Boolean
     On Error GoTo EH
 
-    Dim ppApp As Object, pres As Object
-    Set ppApp = CreateObject("PowerPoint.Application")
-    On Error Resume Next
-    ppApp.DisplayAlerts = 1
-    ppApp.AutomationSecurity = 3
-    On Error GoTo EH
-
+    Dim pres As Object
     Set pres = ppApp.Presentations.Open(path, False, False, 0)
 
     On Error Resume Next
@@ -460,7 +468,6 @@ Private Function SetAuthor_PowerPoint(ByVal path As String, ByVal newAuthor As S
         Err.Clear
         On Error GoTo EH
         pres.Close
-        ppApp.Quit
         SetAuthor_PowerPoint = False
         Exit Function
     End If
@@ -468,7 +475,6 @@ Private Function SetAuthor_PowerPoint(ByVal path As String, ByVal newAuthor As S
 
     pres.Save
     pres.Close
-    ppApp.Quit
 
     SetAuthor_PowerPoint = True
     Exit Function
@@ -477,14 +483,13 @@ EH:
     errMsg = "PowerPoint失敗: " & Err.Description
     On Error Resume Next
     If Not pres Is Nothing Then pres.Close
-    If Not ppApp Is Nothing Then ppApp.Quit
     On Error GoTo 0
     SetAuthor_PowerPoint = False
 End Function
 
 
 '============================================================
-' PDF：ExifTool がある場合のみ Author変更
+' PDF：ExifToolがある場合のみ Author変更（失敗してもTouchは別で実施）
 '============================================================
 Private Function SetAuthor_PDF_ExifTool(ByVal path As String, ByVal newAuthor As String, ByRef errMsg As String) As Boolean
     Dim cmd As String, rc As Long
@@ -508,7 +513,20 @@ End Function
 
 
 '============================================================
-' 便利関数
+' 見た目
+'============================================================
+Private Sub ApplyFontMeiryo10(ByVal ws As Worksheet, ByVal lastRow As Long)
+    Dim r As Long
+    r = Application.WorksheetFunction.Max(2, lastRow)
+    With ws.Range("A1:B" & r).Font
+        .Name = "メイリオ"
+        .Size = 10
+    End With
+End Sub
+
+
+'============================================================
+' 判定・小物
 '============================================================
 Private Function PathExists(ByVal path As String) As Boolean
     Dim pApi As String
@@ -529,15 +547,6 @@ Private Function IsDirectoryPath(ByVal path As String) As Boolean
     End If
 End Function
 
-Private Sub ApplyFontMeiryo10(ByVal ws As Worksheet, ByVal lastRow As Long)
-    Dim r As Long
-    r = Application.WorksheetFunction.Max(2, lastRow)
-    With ws.Range("A1:B" & r).Font
-        .Name = "メイリオ"
-        .Size = 10
-    End With
-End Sub
-
 Private Function NormalizePathText(ByVal v As Variant) As String
     Dim t As String
     t = CStr(v)
@@ -551,11 +560,7 @@ End Function
 Private Function GetExtension(ByVal path As String) As String
     Dim p As Long
     p = InStrRev(path, ".")
-    If p <= 0 Then
-        GetExtension = ""
-    Else
-        GetExtension = Mid$(path, p + 1)
-    End If
+    If p <= 0 Then GetExtension = "" Else GetExtension = Mid$(path, p + 1)
 End Function
 
 Private Function NormalizeLongPath(ByVal p As String) As String
@@ -602,6 +607,12 @@ Private Function RunHidden(ByVal cmd As String) As Long
     RunHidden = sh.Run(cmd, 0, True)
 End Function
 
+
 #Else
-' VBA7 以外は何もしない（コンパイルエラー回避）
+
+' VBA7 以外（例：Mac版Excel等）は API が使えないため、実行不可メッセージだけ出す
+Public Sub FixAuthor_AndTouch_FromColA()
+    MsgBox "このマクロは Windows版 Excel（VBA7 / 64bit想定）でのみ動作します。", vbExclamation
+End Sub
+
 #End If
