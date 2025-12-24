@@ -1,0 +1,223 @@
+Option Explicit
+
+'============================================================
+' メイン：設定 + 変換（1マクロで完結）
+'============================================================
+Public Sub MakeUniqueDisplayNames()
+    Dim ws As Worksheet
+    Set ws = ActiveSheet
+    
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    
+    ' 1) 体裁設定（ヘッダー・フォント・フィルター・枠線・固定表示など）
+    SetupSheetFormatting ws
+    
+    ' 2) 表示名生成（C列をユニークに）
+    BuildUniqueDisplayNames ws
+    
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+End Sub
+
+'============================================================
+' シートの体裁を整える
+'============================================================
+Private Sub SetupSheetFormatting(ByVal ws As Worksheet)
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, "B").End(xlUp).Row
+    If lastRow < 2 Then lastRow = 2
+    
+    ' ヘッダー
+    ws.Range("B1").Value = "氏名"
+    ws.Range("C1").Value = "表示名"
+    
+    ' C列は一旦クリア（必要なら）
+    ws.Range("C2:C" & lastRow).ClearContents
+    
+    ' フォント（メイリオ 10pt）
+    With ws.Range("B:C")
+        .Font.Name = "メイリオ"
+        .Font.Size = 10
+    End With
+    
+    ' ヘッダーの見た目
+    With ws.Range("B1:C1")
+        .Font.Bold = True
+        .Interior.Color = RGB(230, 230, 230) ' 薄いグレー
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+    End With
+    
+    ' フィルター
+    If ws.AutoFilterMode Then ws.AutoFilterMode = False
+    ws.Range("B1:C" & lastRow).AutoFilter
+    
+    ' 枠線
+    With ws.Range("B1:C" & lastRow).Borders
+        .LineStyle = xlContinuous
+        .Weight = xlThin
+    End With
+    
+    ' 列幅
+    ws.Columns("B:C").AutoFit
+    
+    ' 1行目固定（ヘッダー固定表示）
+    With ActiveWindow
+        .SplitColumn = 0
+        .SplitRow = 1
+        .FreezePanes = True
+    End With
+End Sub
+
+'============================================================
+' B列の氏名から C列の表示名をユニークに生成
+'============================================================
+Private Sub BuildUniqueDisplayNames(ByVal ws As Worksheet)
+    Dim lastRow As Long, i As Long
+    lastRow = ws.Cells(ws.Rows.Count, "B").End(xlUp).Row
+    If lastRow < 2 Then Exit Sub
+    
+    Dim dictCount As Object, dictUsed As Object
+    Set dictCount = CreateObject("Scripting.Dictionary") ' 苗字の出現回数
+    Set dictUsed = CreateObject("Scripting.Dictionary")  ' C列出力の重複防止
+    dictCount.CompareMode = vbTextCompare
+    dictUsed.CompareMode = vbTextCompare
+    
+    ' まず苗字のカウント
+    For i = 2 To lastRow
+        Dim raw As String, sei As String, mei As String
+        raw = CStr(ws.Cells(i, "B").Value)
+        Call ParseFullName(raw, sei, mei)
+        
+        If Len(sei) > 0 Then
+            If dictCount.Exists(sei) Then
+                dictCount(sei) = CLng(dictCount(sei)) + 1
+            Else
+                dictCount.Add sei, 1
+            End If
+        End If
+    Next i
+    
+    ' 次に C列を作る（全体としてユニーク）
+    For i = 2 To lastRow
+        Dim raw2 As String, sei2 As String, mei2 As String
+        raw2 = CStr(ws.Cells(i, "B").Value)
+        Call ParseFullName(raw2, sei2, mei2)
+        
+        If Len(sei2) = 0 Then
+            ws.Cells(i, "C").Value = ""
+        Else
+            Dim out As String
+            out = MakeUniqueLabel(sei2, mei2, dictCount, dictUsed)
+            ws.Cells(i, "C").Value = out
+        End If
+    Next i
+    
+    ws.Columns("C").AutoFit
+End Sub
+
+'============================================================
+' 氏名文字列を「苗字」「名前」に分解
+' - 全角スペースは半角へ寄せ、Trim で余分な空白を潰す
+'============================================================
+Private Sub ParseFullName(ByVal s As String, ByRef sei As String, ByRef mei As String)
+    Dim t As String
+    t = Replace(CStr(s), ChrW(&H3000), " ") ' 全角スペース→半角スペース
+    On Error Resume Next
+    t = Application.WorksheetFunction.Trim(t) ' 連続空白を1つにし、前後をtrim
+    On Error GoTo 0
+    
+    Dim p As Long
+    p = InStr(1, t, " ", vbBinaryCompare) ' 「苗字 半角スペース 名前」
+    
+    If p > 0 Then
+        sei = Left$(t, p - 1)
+        mei = Mid$(t, p + 1)
+    Else
+        ' スペースが無い場合は全部苗字扱い（名前は空）
+        sei = t
+        mei = ""
+    End If
+End Sub
+
+'============================================================
+' ユニークな表示名を作る
+' - 苗字がユニーク：苗字のみ
+' - 苗字が重複：苗字(名前の先頭1文字) を基本に、重複したら先頭2文字…と伸ばす
+' - それでも重複（同名など）：連番を付けて必ずユニーク化
+'============================================================
+Private Function MakeUniqueLabel( _
+    ByVal sei As String, _
+    ByVal mei As String, _
+    ByVal dictCount As Object, _
+    ByVal dictUsed As Object _
+) As String
+    
+    Dim candidate As String
+    
+    If dictCount.Exists(sei) And CLng(dictCount(sei)) = 1 Then
+        candidate = sei
+        If Not dictUsed.Exists(candidate) Then
+            dictUsed.Add candidate, 1
+            MakeUniqueLabel = candidate
+            Exit Function
+        End If
+        ' 万一ぶつかったら（理屈上ほぼ無いが）連番
+        MakeUniqueLabel = MakeWithSerial(sei, dictUsed)
+        Exit Function
+    End If
+    
+    ' 苗字が重複している場合
+    Dim k As Long
+    If Len(mei) = 0 Then
+        ' 名前が取れない場合は連番でユニーク化
+        MakeUniqueLabel = MakeWithSerial(sei, dictUsed)
+        Exit Function
+    End If
+    
+    For k = 1 To Len(mei)
+        candidate = sei & "(" & Left$(mei, k) & ")"
+        If Not dictUsed.Exists(candidate) Then
+            dictUsed.Add candidate, 1
+            MakeUniqueLabel = candidate
+            Exit Function
+        End If
+    Next k
+    
+    ' ここまで来るのは「同姓同名」などで全プレフィックスが衝突したとき
+    Dim n As Long: n = 2
+    Do
+        candidate = sei & "(" & mei & CStr(n) & ")"
+        If Not dictUsed.Exists(candidate) Then
+            dictUsed.Add candidate, 1
+            MakeUniqueLabel = candidate
+            Exit Function
+        End If
+        n = n + 1
+    Loop
+End Function
+
+'============================================================
+' 苗字のみ表示の連番ユニーク化（例：佐藤, 佐藤2, 佐藤3 ...）
+'============================================================
+Private Function MakeWithSerial(ByVal base As String, ByVal dictUsed As Object) As String
+    Dim n As Long: n = 2
+    Dim c As String
+    
+    If Not dictUsed.Exists(base) Then
+        dictUsed.Add base, 1
+        MakeWithSerial = base
+        Exit Function
+    End If
+    
+    Do
+        c = base & CStr(n)
+        If Not dictUsed.Exists(c) Then
+            dictUsed.Add c, 1
+            MakeWithSerial = c
+            Exit Function
+        End If
+        n = n + 1
+    Loop
+End Function
