@@ -1,0 +1,599 @@
+Option Explicit
+
+' ======================================================================
+' 名簿統合マクロ（最新版：シート自動生成／データなし時は初期化のみ＋MsgBox）
+'
+' 【入力シート】（存在しない場合は自動生成）
+'  1) 上司名簿         : 氏名 / システム上の氏名 / 所属 / グループ / 役職 / コード
+'  2) 年次順           : （貼り方は自由）どこかに「コード」が縦に並んでいればOK（コード100%前提）
+'  3) system_vs_mail   : システム上の氏名 / メールアドレス
+'  4) 氏名_vs_名簿上   : 氏名 / 名簿上の名前
+'
+' 【出力シート】（存在しない場合は自動生成）
+'  統合名簿 : コード / 氏名 / 役職 / 所属 / グループ / 表示名 / システム上の氏名 / メールアドレス / 特技懇（〇×プルダウン）
+'
+' 【体裁】
+'  - すべてのシート：メイリオ10pt、1行目固定（Freeze Panes）、ヘッダー整形（太字・塗り）
+'
+' 【データなし時の動作】
+'  - 上司名簿に実データが無い場合：
+'     各シートのテンプレ（ヘッダー・枠・フォント等）初期化のみ実施して終了
+'     MsgBox「データなし」
+' ======================================================================
+
+' -------------------------------
+' ★シート名（必要に応じて変更）
+' -------------------------------
+Private Const SH_BOSS  As String = "上司名簿"
+Private Const SH_ORDER As String = "年次順"
+Private Const SH_MAIL  As String = "system_vs_mail"
+Private Const SH_DISP  As String = "氏名_vs_名簿上"
+Private Const SH_OUT   As String = "統合名簿"
+
+' -------------------------------
+' ★出力ヘッダー（固定）
+' -------------------------------
+Private OUTPUT_HEADERS As Variant
+
+' ======================================================================
+' 公開：この1本だけ実行
+' ======================================================================
+Public Sub 名簿統合_実行()
+  On Error GoTo EH
+
+  Application.ScreenUpdating = False
+  Application.EnableEvents = False
+  Application.DisplayAlerts = False
+
+  OUTPUT_HEADERS = Array( _
+    "コード", "氏名", "役職", "所属", "グループ", _
+    "表示名", "システム上の氏名", "メールアドレス", "特技懇" _
+  )
+
+  Dim wb As Workbook: Set wb = ThisWorkbook
+
+  ' --- シートを必ず用意（無ければ作る）
+  Dim wsBoss As Worksheet, wsOrder As Worksheet, wsMail As Worksheet, wsDisp As Worksheet, wsOut As Worksheet
+  Set wsBoss = GetOrCreateSheet(wb, SH_BOSS)
+  Set wsOrder = GetOrCreateSheet(wb, SH_ORDER)
+  Set wsMail = GetOrCreateSheet(wb, SH_MAIL)
+  Set wsDisp = GetOrCreateSheet(wb, SH_DISP)
+  Set wsOut = GetOrCreateSheet(wb, SH_OUT)
+
+  ' --- データが無い場合でも「初期化（テンプレ整形）」を実施する
+  InitTemplateBoss wsBoss
+  InitTemplateOrder wsOrder
+  InitTemplateMail wsMail
+  InitTemplateDisp wsDisp
+  InitTemplateOut wsOut, OUTPUT_HEADERS
+
+  ' --- 体裁統一（全シート）
+  ApplyStandardSheetFormat wsBoss
+  ApplyStandardSheetFormat wsOrder
+  ApplyStandardSheetFormat wsMail
+  ApplyStandardSheetFormat wsDisp
+  ApplyStandardSheetFormat wsOut
+
+  ' --- 【データなし判定】上司名簿にコード行が無ければ終了（仕様）
+  If Not HasBossData(wsBoss) Then
+    MsgBox "データなし（上司名簿に実データがありません）。" & vbCrLf & _
+           "ヘッダー整形／枠／フォント等の初期化のみ実施しました。", vbInformation
+    GoTo FIN
+  End If
+
+  ' ===========================
+  ' ここから統合処理（データあり）
+  ' ===========================
+
+  ' --- 上司名簿：必須列位置をヘッダーから特定（列は増減してOK）
+  Dim bossHeaderRow As Long
+  Dim colCode As Long, colName As Long, colSys As Long, colDept As Long, colGroup As Long, colRole As Long
+
+  bossHeaderRow = FindHeaderRow(wsBoss, Array("コード", "Code", "ID"))
+  If bossHeaderRow = 0 Then
+    MsgBox "データなし（上司名簿のヘッダー「コード」が見つかりません）。" & vbCrLf & _
+           "ヘッダー整形／枠／フォント等の初期化のみ実施しました。", vbInformation
+    GoTo FIN
+  End If
+
+  colCode = FindColInRow(wsBoss, bossHeaderRow, Array("コード", "Code", "ID"))
+  colName = FindColInRow(wsBoss, bossHeaderRow, Array("氏名", "名前", "Name"))
+  colSys = FindColInRow(wsBoss, bossHeaderRow, Array("システム上の氏名", "システム氏名", "SystemName", "system"))
+  colDept = FindColInRow(wsBoss, bossHeaderRow, Array("所属", "部署", "部門"))
+  colGroup = FindColInRow(wsBoss, bossHeaderRow, Array("グループ", "Group"))
+  colRole = FindColInRow(wsBoss, bossHeaderRow, Array("役職", "職位", "Role"))
+
+  If colName = 0 Or colSys = 0 Or colDept = 0 Or colGroup = 0 Or colRole = 0 Or colCode = 0 Then
+    MsgBox "上司名簿の必須ヘッダー（氏名/システム上の氏名/所属/グループ/役職/コード）が揃っていません。" & vbCrLf & _
+           "初期化のみ実施して終了します。", vbExclamation
+    GoTo FIN
+  End If
+
+  ' --- 上司名簿をコードキーで読み込み（人の正はここ）
+  Dim dictBoss As Object: Set dictBoss = CreateObject("Scripting.Dictionary") ' key: code, value: rec(1..5)
+  Dim bossCodesInSheetOrder As Collection: Set bossCodesInSheetOrder = New Collection
+  ReadBossRoster wsBoss, bossHeaderRow, colCode, colName, colSys, colDept, colGroup, colRole, dictBoss, bossCodesInSheetOrder
+
+  ' --- system vs メール（key: システム上の氏名）
+  Dim dictMail As Object: Set dictMail = CreateObject("Scripting.Dictionary")
+  ReadSimpleMap wsMail, Array("システム上の氏名", "SystemName", "system"), Array("メールアドレス", "メール", "Mail"), dictMail
+
+  ' --- 氏名 vs 名簿上（key: 氏名）→ 表示名として利用
+  Dim dictDisp As Object: Set dictDisp = CreateObject("Scripting.Dictionary")
+  ReadSimpleMap wsDisp, Array("氏名", "名前", "Name"), Array("名簿上の名前", "表示名", "名簿上"), dictDisp
+
+  ' --- 年次順（コードは100%ある前提）：上司名簿に存在するコードだけ順序として採用
+  Dim orderCodes As Collection: Set orderCodes = New Collection
+  ReadOrderCodes wsOrder, dictBoss, orderCodes
+
+  ' --- 出力シートをクリアしてヘッダー再出力（体裁は維持）
+  wsOut.Cells.Clear
+  InitTemplateOut wsOut, OUTPUT_HEADERS
+  ApplyStandardSheetFormat wsOut
+
+  ' --- 出力行生成：年次順→残り（上司名簿の元順）
+  Dim used As Object: Set used = CreateObject("Scripting.Dictionary")
+  Dim rOut As Long: rOut = 2
+
+  Dim code As Variant
+  For Each code In orderCodes
+    If dictBoss.Exists(code) Then
+      If Not used.Exists(code) Then
+        WriteOne wsOut, rOut, CStr(code), dictBoss, dictDisp, dictMail
+        used.Add CStr(code), True
+        rOut = rOut + 1
+      End If
+    End If
+  Next
+
+  ' 年次順に出てこない在籍者（上司名簿にいるがorderにいない）を末尾へ
+  Dim c As Variant
+  For Each c In bossCodesInSheetOrder
+    If dictBoss.Exists(c) Then
+      If Not used.Exists(c) Then
+        WriteOne wsOut, rOut, CStr(c), dictBoss, dictDisp, dictMail
+        used.Add CStr(c), True
+        rOut = rOut + 1
+      End If
+    End If
+  Next
+
+  ' --- 特技懇：〇/×のプルダウン（データ行範囲に適用）
+  If rOut > 2 Then
+    ApplyMaruBatsuDropdown wsOut, 2, rOut - 1, 9 ' 9列目＝特技懇
+  Else
+    ' 念のためテンプレ範囲にも適用
+    ApplyMaruBatsuDropdown wsOut, 2, 200, 9
+  End If
+
+  ' --- 見やすさ（最低限）
+  wsOut.Columns.AutoFit
+  wsOut.Columns(8).ColumnWidth = 28 ' メール
+  wsOut.Columns(6).ColumnWidth = 16 ' 表示名
+  wsOut.Columns(7).ColumnWidth = 18 ' システム上の氏名
+
+  MsgBox "統合名簿を生成しました: " & SH_OUT, vbInformation
+
+FIN:
+  Application.DisplayAlerts = True
+  Application.EnableEvents = True
+  Application.ScreenUpdating = True
+  Exit Sub
+
+EH:
+  Application.DisplayAlerts = True
+  Application.EnableEvents = True
+  Application.ScreenUpdating = True
+  MsgBox "エラー: " & Err.Description, vbExclamation
+End Sub
+
+' ======================================================================
+' 【データなし判定】上司名簿に「コード」の実データ行があるか
+' ======================================================================
+Private Function HasBossData(ByVal ws As Worksheet) As Boolean
+  Dim headerRow As Long: headerRow = FindHeaderRow(ws, Array("コード", "Code", "ID"))
+  If headerRow = 0 Then
+    HasBossData = False
+    Exit Function
+  End If
+
+  Dim colCode As Long: colCode = FindColInRow(ws, headerRow, Array("コード", "Code", "ID"))
+  If colCode = 0 Then
+    HasBossData = False
+    Exit Function
+  End If
+
+  Dim lastRow As Long: lastRow = LastUsedRow(ws)
+  Dim r As Long
+
+  For r = headerRow + 1 To lastRow
+    If Len(NormCode(ws.Cells(r, colCode).Value)) > 0 Then
+      HasBossData = True
+      Exit Function
+    End If
+  Next r
+
+  HasBossData = False
+End Function
+
+' ======================================================================
+' テンプレ初期化（各シート：ヘッダー・枠・塗り等）
+' ※「データが無い場合でも」実行する想定
+' ======================================================================
+Private Sub InitTemplateBoss(ByVal ws As Worksheet)
+  Dim headers As Variant
+  headers = Array("氏名", "システム上の氏名", "所属", "グループ", "役職", "コード")
+
+  ' 1行目が空ならヘッダーを置く（既に貼ってある場合は触らない）
+  If WorksheetFunction.CountA(ws.Rows(1)) = 0 Then
+    ws.Range("A1").Resize(1, UBound(headers) + 1).Value = headers
+  End If
+
+  ApplyHeaderAndFrame ws, 1, UBound(headers) + 1, 200
+End Sub
+
+Private Sub InitTemplateOrder(ByVal ws As Worksheet)
+  Dim headers As Variant
+  headers = Array("名簿上の名前", "コード")
+
+  If WorksheetFunction.CountA(ws.Rows(1)) = 0 Then
+    ws.Range("A1").Resize(1, UBound(headers) + 1).Value = headers
+  End If
+
+  ApplyHeaderAndFrame ws, 1, UBound(headers) + 1, 300
+End Sub
+
+Private Sub InitTemplateMail(ByVal ws As Worksheet)
+  Dim headers As Variant
+  headers = Array("システム上の氏名", "メールアドレス")
+
+  If WorksheetFunction.CountA(ws.Rows(1)) = 0 Then
+    ws.Range("A1").Resize(1, UBound(headers) + 1).Value = headers
+  End If
+
+  ApplyHeaderAndFrame ws, 1, UBound(headers) + 1, 300
+End Sub
+
+Private Sub InitTemplateDisp(ByVal ws As Worksheet)
+  Dim headers As Variant
+  headers = Array("氏名", "名簿上の名前")
+
+  If WorksheetFunction.CountA(ws.Rows(1)) = 0 Then
+    ws.Range("A1").Resize(1, UBound(headers) + 1).Value = headers
+  End If
+
+  ApplyHeaderAndFrame ws, 1, UBound(headers) + 1, 300
+End Sub
+
+Private Sub InitTemplateOut(ByVal ws As Worksheet, ByVal headers As Variant)
+  ' 出力は常にこのヘッダー（仕様）
+  ws.Range("A1").Resize(1, UBound(headers) + 1).Value = headers
+  ApplyHeaderAndFrame ws, 1, UBound(headers) + 1, 200
+
+  ' 特技懇（〇×）はテンプレ範囲にもプルダウンを仕込む（任意）
+  ApplyMaruBatsuDropdown ws, 2, 200, 9
+End Sub
+
+' ======================================================================
+' ヘッダーの整形＋枠（最低限の「見た目初期化」）
+' ======================================================================
+Private Sub ApplyHeaderAndFrame(ByVal ws As Worksheet, ByVal headerRow As Long, ByVal colCount As Long, ByVal templateRows As Long)
+  ' ヘッダー見た目
+  BeautifyHeaderRow ws, headerRow, colCount
+
+  ' 枠（ヘッダー＋テンプレ範囲）
+  Dim rng As Range
+  Set rng = ws.Range(ws.Cells(1, 1), ws.Cells(templateRows, colCount))
+
+  With rng.Borders
+    .LineStyle = xlContinuous
+    .Weight = xlThin
+  End With
+
+  ws.Rows(headerRow).RowHeight = 18
+End Sub
+
+' ======================================================================
+' 1行分の出力
+' ======================================================================
+Private Sub WriteOne(ByVal ws As Worksheet, ByVal r As Long, ByVal code As String, _
+                     ByVal dictBoss As Object, ByVal dictDisp As Object, ByVal dictMail As Object)
+
+  Dim rec As Variant: rec = dictBoss(code)
+  ' rec(1)=氏名, rec(2)=システム上の氏名, rec(3)=所属, rec(4)=グループ, rec(5)=役職
+
+  Dim name As String: name = Nz(rec(1))
+  Dim sysName As String: sysName = Nz(rec(2))
+
+  Dim displayName As String: displayName = ""
+  If dictDisp.Exists(NormKey(name)) Then displayName = Nz(dictDisp(NormKey(name)))
+
+  Dim mail As String: mail = ""
+  If dictMail.Exists(NormKey(sysName)) Then mail = Nz(dictMail(NormKey(sysName)))
+
+  ws.Cells(r, 1).Value = code
+  ws.Cells(r, 2).Value = name
+  ws.Cells(r, 3).Value = Nz(rec(5)) ' 役職
+  ws.Cells(r, 4).Value = Nz(rec(3)) ' 所属
+  ws.Cells(r, 5).Value = Nz(rec(4)) ' グループ
+  ws.Cells(r, 6).Value = displayName
+  ws.Cells(r, 7).Value = sysName
+  ws.Cells(r, 8).Value = mail
+  ws.Cells(r, 9).Value = "" ' 特技懇（プルダウン）
+End Sub
+
+' ======================================================================
+' 上司名簿読み込み（コードキー）
+' ======================================================================
+Private Sub ReadBossRoster(ByVal ws As Worksheet, ByVal headerRow As Long, _
+                           ByVal colCode As Long, ByVal colName As Long, ByVal colSys As Long, _
+                           ByVal colDept As Long, ByVal colGroup As Long, ByVal colRole As Long, _
+                           ByVal dictBoss As Object, ByVal codesInOrder As Collection)
+
+  Dim lastRow As Long: lastRow = LastUsedRow(ws)
+  Dim r As Long
+
+  For r = headerRow + 1 To lastRow
+    Dim code As String: code = NormCode(ws.Cells(r, colCode).Value)
+    If Len(code) = 0 Then GoTo CONT
+
+    Dim name As String: name = NormText(ws.Cells(r, colName).Value)
+    Dim sysName As String: sysName = NormText(ws.Cells(r, colSys).Value)
+    Dim dept As String: dept = NormText(ws.Cells(r, colDept).Value)
+    Dim grp As String: grp = NormText(ws.Cells(r, colGroup).Value)
+    Dim role As String: role = NormText(ws.Cells(r, colRole).Value)
+
+    ' 同一コードが複数あった場合は最初を優先
+    If Not dictBoss.Exists(code) Then
+      Dim rec(1 To 5) As String
+      rec(1) = name
+      rec(2) = sysName
+      rec(3) = dept
+      rec(4) = grp
+      rec(5) = role
+      dictBoss.Add code, rec
+      codesInOrder.Add code
+    End If
+
+CONT:
+  Next r
+End Sub
+
+' ======================================================================
+' system/mail や 氏名/名簿上 のような2列マップを読む
+' ======================================================================
+Private Sub ReadSimpleMap(ByVal ws As Worksheet, ByVal keyHeaders As Variant, ByVal valHeaders As Variant, _
+                          ByVal dictOut As Object)
+
+  Dim headerRow As Long: headerRow = FindAnyHeaderRow(ws, keyHeaders, valHeaders)
+  If headerRow = 0 Then headerRow = 1
+
+  Dim colKey As Long: colKey = FindColInRow(ws, headerRow, keyHeaders)
+  Dim colVal As Long: colVal = FindColInRow(ws, headerRow, valHeaders)
+  If colKey = 0 Or colVal = 0 Then Exit Sub
+
+  Dim lastRow As Long: lastRow = LastUsedRow(ws)
+  Dim r As Long
+
+  For r = headerRow + 1 To lastRow
+    Dim k As String: k = NormKey(ws.Cells(r, colKey).Value)
+    If Len(k) = 0 Then GoTo CONT
+
+    Dim v As String: v = NormText(ws.Cells(r, colVal).Value)
+    If Len(v) = 0 Then GoTo CONT
+
+    If Not dictOut.Exists(k) Then dictOut.Add k, v
+CONT:
+  Next r
+End Sub
+
+' ======================================================================
+' 年次順シートから「上司名簿に存在するコード」だけを順序として抽出
+' - 貼り方のブレ吸収：先頭最大5列・全行を走査してコード拾い
+' ======================================================================
+Private Sub ReadOrderCodes(ByVal ws As Worksheet, ByVal dictBoss As Object, ByVal outCodes As Collection)
+  Dim lastRow As Long: lastRow = LastUsedRow(ws)
+  Dim lastCol As Long: lastCol = LastUsedCol(ws)
+  If lastRow < 1 Or lastCol < 1 Then Exit Sub
+
+  Dim seen As Object: Set seen = CreateObject("Scripting.Dictionary")
+
+  Dim r As Long, c As Long
+  For r = 1 To lastRow
+    For c = 1 To Application.Min(lastCol, 5)
+      Dim v As String: v = NormCode(ws.Cells(r, c).Value)
+      If Len(v) > 0 Then
+        If dictBoss.Exists(v) Then
+          If Not seen.Exists(v) Then
+            outCodes.Add v
+            seen.Add v, True
+          End If
+        End If
+      End If
+    Next c
+  Next r
+End Sub
+
+' ======================================================================
+' 特技懇：〇/×プルダウン
+' ======================================================================
+Private Sub ApplyMaruBatsuDropdown(ByVal ws As Worksheet, ByVal rowFrom As Long, ByVal rowTo As Long, ByVal col As Long)
+  If rowTo < rowFrom Then Exit Sub
+
+  Dim rng As Range
+  Set rng = ws.Range(ws.Cells(rowFrom, col), ws.Cells(rowTo, col))
+
+  With rng.Validation
+    .Delete
+    .Add Type:=xlValidateList, AlertStyle:=xlValidAlertStop, Operator:=xlBetween, Formula1:="〇,×"
+    .IgnoreBlank = True
+    .InCellDropdown = True
+    .ShowError = True
+  End With
+End Sub
+
+' ======================================================================
+' 体裁：メイリオ10pt + 1行目固定（Freeze Panes）
+' ======================================================================
+Private Sub ApplyStandardSheetFormat(ByVal ws As Worksheet)
+  With ws.Cells.Font
+    .Name = "メイリオ"
+    .Size = 10
+  End With
+
+  ' 1行目固定（A2でFreeze Panes）
+  On Error Resume Next
+  ws.Activate
+  ws.Range("A2").Select
+  ActiveWindow.FreezePanes = False
+  ActiveWindow.FreezePanes = True
+  On Error GoTo 0
+End Sub
+
+' ======================================================================
+' ヘッダー行の見た目（塗りつぶし等）
+' ======================================================================
+Private Sub BeautifyHeaderRow(ByVal ws As Worksheet, ByVal headerRow As Long, ByVal colCount As Long)
+  With ws.Range(ws.Cells(headerRow, 1), ws.Cells(headerRow, colCount))
+    .Font.Bold = True
+    .HorizontalAlignment = xlCenter
+    .VerticalAlignment = xlCenter
+    .Interior.Color = RGB(242, 242, 242)
+  End With
+End Sub
+
+' ======================================================================
+' シート取得（なければ作成）
+' ======================================================================
+Private Function GetOrCreateSheet(ByVal wb As Workbook, ByVal name As String) As Worksheet
+  On Error Resume Next
+  Set GetOrCreateSheet = wb.Worksheets(name)
+  On Error GoTo 0
+  If GetOrCreateSheet Is Nothing Then
+    Set GetOrCreateSheet = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    GetOrCreateSheet.Name = name
+  End If
+End Function
+
+' ======================================================================
+' ヘッダー行検出：指定候補（例：コード）を含む行を探す
+' ======================================================================
+Private Function FindHeaderRow(ByVal ws As Worksheet, ByVal headerCandidates As Variant) As Long
+  Dim r As Long, c As Long
+  Dim lastRow As Long: lastRow = Application.Min(10, LastUsedRow(ws))
+  Dim lastCol As Long: lastCol = Application.Min(200, LastUsedCol(ws))
+
+  For r = 1 To lastRow
+    For c = 1 To lastCol
+      Dim t As String: t = NormHeader(ws.Cells(r, c).Value)
+      If IsInCandidates(t, headerCandidates) Then
+        FindHeaderRow = r
+        Exit Function
+      End If
+    Next c
+  Next r
+
+  FindHeaderRow = 0
+End Function
+
+Private Function FindAnyHeaderRow(ByVal ws As Worksheet, ByVal keyHeaders As Variant, ByVal valHeaders As Variant) As Long
+  Dim r As Long, c As Long
+  Dim lastRow As Long: lastRow = Application.Min(10, LastUsedRow(ws))
+  Dim lastCol As Long: lastCol = Application.Min(200, LastUsedCol(ws))
+
+  For r = 1 To lastRow
+    Dim hasKey As Boolean: hasKey = False
+    Dim hasVal As Boolean: hasVal = False
+
+    For c = 1 To lastCol
+      Dim t As String: t = NormHeader(ws.Cells(r, c).Value)
+      If IsInCandidates(t, keyHeaders) Then hasKey = True
+      If IsInCandidates(t, valHeaders) Then hasVal = True
+    Next c
+
+    If hasKey And hasVal Then
+      FindAnyHeaderRow = r
+      Exit Function
+    End If
+  Next r
+
+  FindAnyHeaderRow = 0
+End Function
+
+' ======================================================================
+' 指定行の中でヘッダー候補に一致する列番号を返す
+' ======================================================================
+Private Function FindColInRow(ByVal ws As Worksheet, ByVal headerRow As Long, ByVal headerCandidates As Variant) As Long
+  Dim lastCol As Long: lastCol = Application.Min(200, LastUsedCol(ws))
+  Dim c As Long
+  For c = 1 To lastCol
+    Dim t As String: t = NormHeader(ws.Cells(headerRow, c).Value)
+    If IsInCandidates(t, headerCandidates) Then
+      FindColInRow = c
+      Exit Function
+    End If
+  Next c
+  FindColInRow = 0
+End Function
+
+Private Function IsInCandidates(ByVal text As String, ByVal candidates As Variant) As Boolean
+  Dim i As Long
+  For i = LBound(candidates) To UBound(candidates)
+    If text = NormHeader(candidates(i)) Then
+      IsInCandidates = True
+      Exit Function
+    End If
+  Next i
+  IsInCandidates = False
+End Function
+
+' ======================================================================
+' 最終行/最終列
+' ======================================================================
+Private Function LastUsedRow(ByVal ws As Worksheet) As Long
+  On Error Resume Next
+  LastUsedRow = ws.Cells.Find(What:="*", LookIn:=xlFormulas, SearchOrder:=xlByRows, SearchDirection:=xlPrevious).Row
+  If LastUsedRow = 0 Then LastUsedRow = 1
+  On Error GoTo 0
+End Function
+
+Private Function LastUsedCol(ByVal ws As Worksheet) As Long
+  On Error Resume Next
+  LastUsedCol = ws.Cells.Find(What:="*", LookIn:=xlFormulas, SearchOrder:=xlByColumns, SearchDirection:=xlPrevious).Column
+  If LastUsedCol = 0 Then LastUsedCol = 1
+  On Error GoTo 0
+End Function
+
+' ======================================================================
+' 正規化（比較用）
+' ======================================================================
+Private Function NormHeader(ByVal v As Variant) As String
+  NormHeader = NormKey(v)
+End Function
+
+Private Function NormKey(ByVal v As Variant) As String
+  Dim s As String: s = CStr(v)
+  s = Replace(s, vbTab, " ")
+  s = Replace(s, ChrW(&H3000), " ") ' 全角スペース
+  s = WorksheetFunction.Trim(s)
+  NormKey = s
+End Function
+
+Private Function NormText(ByVal v As Variant) As String
+  NormText = NormKey(v)
+End Function
+
+Private Function NormCode(ByVal v As Variant) As String
+  ' コードは文字列として扱う（先頭ゼロ保護）
+  NormCode = NormKey(v)
+End Function
+
+Private Function Nz(ByVal v As Variant) As String
+  If IsError(v) Then
+    Nz = ""
+  ElseIf IsEmpty(v) Then
+    Nz = ""
+  Else
+    Nz = CStr(v)
+  End If
+End Function
