@@ -1,0 +1,98 @@
+Option Explicit
+
+' A列を上から見て、3行単位で
+'   1行目 → B列（氏名）
+'   3行目 → C列（番号）
+' を抽出して書き出す
+Public Sub ExtractNamesAndNumbers_Optimized()
+    Const SHEET_NAME As String = "Sheet1" ' 必要に応じて変更
+    Const COL_SRC As Long = 1 ' A列
+    Const COL_NAME As Long = 2 ' B列
+    Const COL_NUM As Long = 3 ' C列
+
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(SHEET_NAME)
+    On Error GoTo 0
+    If ws Is Nothing Then
+        MsgBox "シートが見つかりません: " & SHEET_NAME, vbExclamation
+        Exit Sub
+    End If
+
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, COL_SRC).End(xlUp).Row
+    If lastRow < 1 Or WorksheetFunction.CountA(ws.Range(ws.Cells(1, COL_SRC), ws.Cells(lastRow, COL_SRC))) = 0 Then
+        ' 表示を整えるだけ
+        ApplyMeiryo10 ws
+        MsgBox "データなし（A列が空です）", vbInformation
+        Exit Sub
+    End If
+
+    Dim oldCalc As XlCalculation
+    oldCalc = Application.Calculation
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
+
+    ' 入力を配列で取得（高速）
+    Dim src As Variant
+    src = ws.Range(ws.Cells(1, COL_SRC), ws.Cells(lastRow, COL_SRC)).Value2  ' 2次元配列(1..N, 1..1)
+
+    ' 件数を先に計算（高速＆Resizeにそのまま使える）
+    Dim nameCount As Long, numCount As Long
+    nameCount = ((lastRow - 1) \ 3) + 1                  ' i=1,4,7,...
+    If lastRow >= 3 Then numCount = ((lastRow - 3) \ 3) + 1 Else numCount = 0 ' i=3,6,9,...
+
+    ' 出力配列
+    Dim outName As Variant, outNum As Variant
+    ReDim outName(1 To nameCount, 1 To 1)
+    If numCount > 0 Then ReDim outNum(1 To numCount, 1 To 1)
+
+    ' 配列上で抽出（セルアクセスしない）
+    Dim i As Long, ni As Long, mi As Long
+    ni = 0: mi = 0
+
+    For i = 1 To lastRow
+        ' (i-1) Mod 3 = 0 → 1,4,7,...
+        If ((i - 1) Mod 3) = 0 Then
+            ni = ni + 1
+            outName(ni, 1) = src(i, 1)
+        End If
+
+        ' (i-1) Mod 3 = 2 → 3,6,9,...
+        If ((i - 1) Mod 3) = 2 Then
+            mi = mi + 1
+            If numCount > 0 Then outNum(mi, 1) = src(i, 1)
+        End If
+    Next i
+
+    ' 既存出力をクリア（必要に応じて範囲は調整）
+    ws.Columns(COL_NAME).ClearContents
+    ws.Columns(COL_NUM).ClearContents
+
+    ' 一括書き込み（高速）
+    ws.Cells(1, COL_NAME).Resize(nameCount, 1).Value2 = outName
+    If numCount > 0 Then
+        ws.Cells(1, COL_NUM).Resize(numCount, 1).Value2 = outNum
+    End If
+
+    ' 表示をメイリオ 10pt（追加要件）
+    ApplyMeiryo10 ws
+
+    Application.Calculation = oldCalc
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+
+    MsgBox "完了：" & vbCrLf & _
+           "氏名 " & nameCount & " 件 → B列" & vbCrLf & _
+           "番号 " & numCount & " 件 → C列", vbInformation
+End Sub
+
+' メイリオ 10pt をシート全体に適用
+Private Sub ApplyMeiryo10(ByVal ws As Worksheet)
+    With ws.Cells.Font
+        .Name = "メイリオ"
+        .Size = 10
+    End With
+End Sub
