@@ -1,0 +1,967 @@
+Option Explicit
+
+' ============================================================
+' 親VBA
+'
+' Sheet1 A1: プロキシアドレス
+' Sheet1 A2: 出力先ルートフォルダ
+' Sheet1 A3: 並列ワーカー数、省略時は3
+'
+' Sheet2 A列: ハイパーリンク
+'
+' 実行:
+'   RunParallelDownloadExtractPdfHtml
+'
+' 注意:
+'   parallel_worker.vbs を、このExcelファイルと同じフォルダ、
+'   または Sheet1 A2 の出力先フォルダに保存してください。
+' ============================================================
+
+Private Const FIRST_DATA_ROW As Long = 2
+Private Const MAX_WORKERS_DEFAULT As Long = 3
+Private Const MAX_WORKERS_LIMIT As Long = 6
+
+Private Const WORKER_FILE_NAME As String = "parallel_worker.vbs"
+
+Private Const DIR_ZIP As String = "ZIP"
+Private Const DIR_EXTRACT As String = "EXTRACT"
+Private Const DIR_PDF As String = "PDF"
+Private Const DIR_HTML As String = "HTML"
+Private Const DIR_HTML_COMBINE As String = "HTML_COMBINE"
+Private Const DIR_WORK As String = "WORK"
+
+Public Sub RunParallelDownloadExtractPdfHtml()
+
+    Dim wsCfg As Worksheet
+    Dim wsList As Worksheet
+
+    Dim proxyRaw As String
+    Dim rootDir As String
+    Dim zipDir As String
+    Dim extractDir As String
+    Dim pdfDir As String
+    Dim htmlDir As String
+    Dim htmlCombineDir As String
+    Dim workRootDir As String
+    Dim workDir As String
+
+    Dim workerPath As String
+    Dim workerCount As Long
+
+    Dim jobs As Collection
+    Dim jobPaths As Collection
+
+    Dim startedCount As Long
+    Dim combinedCount As Long
+
+    Set wsCfg = ThisWorkbook.Worksheets(1)
+    Set wsList = ThisWorkbook.Worksheets(2)
+
+    proxyRaw = Trim(CStr(wsCfg.Range("A1").Value))
+    rootDir = NormalizeFolderPath(CStr(wsCfg.Range("A2").Value))
+
+    If Len(rootDir) = 0 Then
+        MsgBox "Sheet1 A2 に出力先ルートフォルダを指定してください。", vbExclamation
+        Exit Sub
+    End If
+
+    zipDir = CombinePath(rootDir, DIR_ZIP)
+    extractDir = CombinePath(rootDir, DIR_EXTRACT)
+    pdfDir = CombinePath(rootDir, DIR_PDF)
+    htmlDir = CombinePath(rootDir, DIR_HTML)
+    htmlCombineDir = CombinePath(rootDir, DIR_HTML_COMBINE)
+    workRootDir = CombinePath(rootDir, DIR_WORK)
+    workDir = CombinePath(workRootDir, "job_" & Format(Now, "yyyymmdd_hhnnss"))
+
+    EnsureFolderExists rootDir
+    EnsureFolderExists zipDir
+    EnsureFolderExists extractDir
+    EnsureFolderExists pdfDir
+    EnsureFolderExists htmlDir
+    EnsureFolderExists htmlCombineDir
+    EnsureFolderExists workRootDir
+    EnsureFolderExists workDir
+
+    workerPath = ResolveWorkerPath(rootDir)
+
+    If Len(workerPath) = 0 Then
+        MsgBox _
+            "parallel_worker.vbs が見つかりません。" & vbCrLf & _
+            "このExcelファイルと同じフォルダ、または Sheet1 A2 の出力先フォルダに保存してください。", _
+            vbExclamation
+        Exit Sub
+    End If
+
+    Set jobs = CollectJobsFromSheet(wsList)
+
+    If jobs.Count = 0 Then
+        MsgBox "Sheet2 A列に処理対象のURLがありません。", vbExclamation
+        Exit Sub
+    End If
+
+    workerCount = GetWorkerCount(wsCfg, jobs.Count)
+
+    wsList.Range("B1").Value = "URL"
+    wsList.Range("C1").Value = "ダウンロード先"
+    wsList.Range("D1").Value = "展開先"
+    wsList.Range("E1").Value = "PDF結果"
+    wsList.Range("F1").Value = "HTML結果"
+    wsList.Range("G1").Value = "処理結果"
+
+    Set jobPaths = CreateJobFiles(jobs, workDir, workerCount)
+
+    startedCount = StartWorkers(workerPath, jobPaths, rootDir, proxyRaw)
+
+    If startedCount = 0 Then
+        MsgBox "ワーカーを起動できませんでした。", vbExclamation
+        Exit Sub
+    End If
+
+    Application.StatusBar = "並列処理中... 0 / " & startedCount
+
+    WaitForWorkers workDir, startedCount
+
+    ImportWorkerResults wsList, workDir
+
+    combinedCount = CombineHtmlFilesByFiveFromFolder(htmlDir, htmlCombineDir)
+
+    Application.StatusBar = False
+
+    MsgBox _
+        "完了しました。" & vbCrLf & _
+        "ワーカー数: " & startedCount & vbCrLf & _
+        "HTML結合ファイル数: " & combinedCount & vbCrLf & _
+        "作業フォルダ: " & workDir, _
+        vbInformation
+
+End Sub
+
+' ============================================================
+' ジョブ収集・分割・起動
+' ============================================================
+
+Private Function CollectJobsFromSheet(ByVal ws As Worksheet) As Collection
+
+    Dim jobs As Collection
+    Dim lastRow As Long
+    Dim r As Long
+    Dim url As String
+
+    Set jobs = New Collection
+
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+
+    For r = FIRST_DATA_ROW To lastRow
+
+        url = GetUrlFromCell(ws.Cells(r, "A"))
+
+        If Len(url) > 0 Then
+            If IsHttpUrl(url) Then
+                jobs.Add CStr(r) & vbTab & url
+                ws.Cells(r, "B").Value = url
+                ws.Cells(r, "G").Value = "待機中"
+            Else
+                ws.Cells(r, "B").Value = url
+                ws.Cells(r, "G").Value = "HTTP/HTTPS以外のURL"
+            End If
+        End If
+
+    Next r
+
+    Set CollectJobsFromSheet = jobs
+
+End Function
+
+Private Function CreateJobFiles( _
+        ByVal jobs As Collection, _
+        ByVal workDir As String, _
+        ByVal workerCount As Long _
+    ) As Collection
+
+    Dim jobPaths As Collection
+    Dim buffers() As String
+    Dim i As Long
+    Dim w As Long
+    Dim jobPath As String
+
+    Set jobPaths = New Collection
+
+    ReDim buffers(1 To workerCount)
+
+    For i = 1 To jobs.Count
+        w = ((i - 1) Mod workerCount) + 1
+        buffers(w) = buffers(w) & CStr(jobs(i)) & vbCrLf
+    Next i
+
+    For w = 1 To workerCount
+
+        If Len(buffers(w)) > 0 Then
+            jobPath = CombinePath(workDir, "job_" & Format(w, "000") & ".tsv")
+            WriteTextUtf8 jobPath, buffers(w)
+            jobPaths.Add jobPath
+        End If
+
+    Next w
+
+    Set CreateJobFiles = jobPaths
+
+End Function
+
+Private Function StartWorkers( _
+        ByVal workerPath As String, _
+        ByVal jobPaths As Collection, _
+        ByVal rootDir As String, _
+        ByVal proxyRaw As String _
+    ) As Long
+
+    Dim sh As Object
+    Dim i As Long
+    Dim cmd As String
+    Dim jobPath As String
+
+    Set sh = CreateObject("WScript.Shell")
+
+    For i = 1 To jobPaths.Count
+
+        jobPath = CStr(jobPaths(i))
+
+        cmd = "cscript.exe //nologo " & _
+              QuoteArg(workerPath) & " " & _
+              QuoteArg(jobPath) & " " & _
+              QuoteArg(rootDir) & " " & _
+              QuoteArg(proxyRaw) & " " & _
+              QuoteArg(CStr(i))
+
+        sh.Run cmd, 0, False
+
+        StartWorkers = StartWorkers + 1
+
+    Next i
+
+End Function
+
+Private Sub WaitForWorkers( _
+        ByVal workDir As String, _
+        ByVal workerCount As Long _
+    )
+
+    Dim doneCount As Long
+
+    Do
+        doneCount = CountDoneFiles(workDir)
+
+        Application.StatusBar = _
+            "並列処理中... " & doneCount & " / " & workerCount
+
+        DoEvents
+
+        If doneCount >= workerCount Then Exit Do
+
+        Application.Wait Now + TimeSerial(0, 0, 1)
+
+    Loop
+
+End Sub
+
+Private Function CountDoneFiles(ByVal workDir As String) As Long
+
+    Dim fso As Object
+    Dim folder As Object
+    Dim file As Object
+    Dim nameLower As String
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If Not fso.FolderExists(workDir) Then
+        CountDoneFiles = 0
+        Exit Function
+    End If
+
+    Set folder = fso.GetFolder(workDir)
+
+    For Each file In folder.Files
+
+        nameLower = LCase(CStr(file.Name))
+
+        If Left(nameLower, 5) = "done_" And Right(nameLower, 4) = ".txt" Then
+            CountDoneFiles = CountDoneFiles + 1
+        End If
+
+    Next file
+
+End Function
+
+Private Sub ImportWorkerResults( _
+        ByVal ws As Worksheet, _
+        ByVal workDir As String _
+    )
+
+    Dim fso As Object
+    Dim folder As Object
+    Dim file As Object
+    Dim text As String
+    Dim lines() As String
+    Dim parts() As String
+    Dim i As Long
+    Dim rowNo As Long
+    Dim nameLower As String
+    Dim line As String
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If Not fso.FolderExists(workDir) Then Exit Sub
+
+    Set folder = fso.GetFolder(workDir)
+
+    For Each file In folder.Files
+
+        nameLower = LCase(CStr(file.Name))
+
+        If Left(nameLower, 7) = "result_" And Right(nameLower, 4) = ".tsv" Then
+
+            text = ReadTextUtf8(CStr(file.Path))
+            text = Replace(text, vbCrLf, vbLf)
+            text = Replace(text, vbCr, vbLf)
+
+            lines = Split(text, vbLf)
+
+            For i = LBound(lines) To UBound(lines)
+
+                line = Trim(lines(i))
+
+                If Len(line) > 0 Then
+
+                    parts = Split(line, vbTab)
+
+                    If UBound(parts) >= 6 Then
+
+                        rowNo = CLng(Replace(parts(0), ChrW(&HFEFF), ""))
+
+                        ws.Cells(rowNo, "B").Value = parts(1)
+                        ws.Cells(rowNo, "C").Value = parts(2)
+                        ws.Cells(rowNo, "D").Value = parts(3)
+                        ws.Cells(rowNo, "E").Value = parts(4)
+                        ws.Cells(rowNo, "F").Value = parts(5)
+                        ws.Cells(rowNo, "G").Value = parts(6)
+
+                    End If
+
+                End If
+
+            Next i
+
+        End If
+
+    Next file
+
+End Sub
+
+' ============================================================
+' ワーカー数・ワーカーパス
+' ============================================================
+
+Private Function GetWorkerCount( _
+        ByVal wsCfg As Worksheet, _
+        ByVal jobCount As Long _
+    ) As Long
+
+    Dim n As Long
+
+    n = CLng(Val(CStr(wsCfg.Range("A3").Value)))
+
+    If n <= 0 Then n = MAX_WORKERS_DEFAULT
+    If n > MAX_WORKERS_LIMIT Then n = MAX_WORKERS_LIMIT
+    If n > jobCount Then n = jobCount
+    If n <= 0 Then n = 1
+
+    GetWorkerCount = n
+
+End Function
+
+Private Function ResolveWorkerPath(ByVal rootDir As String) As String
+
+    Dim fso As Object
+    Dim p1 As String
+    Dim p2 As String
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If Len(ThisWorkbook.Path) > 0 Then
+        p1 = CombinePath(ThisWorkbook.Path, WORKER_FILE_NAME)
+        If fso.FileExists(p1) Then
+            ResolveWorkerPath = p1
+            Exit Function
+        End If
+    End If
+
+    p2 = CombinePath(rootDir, WORKER_FILE_NAME)
+
+    If fso.FileExists(p2) Then
+        ResolveWorkerPath = p2
+        Exit Function
+    End If
+
+    ResolveWorkerPath = ""
+
+End Function
+
+' ============================================================
+' HTML結合
+' ============================================================
+
+Private Function CombineHtmlFilesByFiveFromFolder( _
+        ByVal htmlDir As String, _
+        ByVal htmlCombineDir As String _
+    ) As Long
+
+    Dim paths As Variant
+
+    paths = GetHtmlFilesSorted(htmlDir)
+
+    If IsEmpty(paths) Then
+        CombineHtmlFilesByFiveFromFolder = 0
+        Exit Function
+    End If
+
+    CombineHtmlFilesByFiveFromFolder = CombineHtmlFilesByFive(paths, htmlCombineDir)
+
+End Function
+
+Private Function GetHtmlFilesSorted(ByVal htmlDir As String) As Variant
+
+    Dim fso As Object
+    Dim folder As Object
+    Dim file As Object
+    Dim arr() As String
+    Dim n As Long
+    Dim ext As String
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If Not fso.FolderExists(htmlDir) Then
+        GetHtmlFilesSorted = Empty
+        Exit Function
+    End If
+
+    Set folder = fso.GetFolder(htmlDir)
+
+    For Each file In folder.Files
+
+        ext = LCase(fso.GetExtensionName(CStr(file.Path)))
+
+        If ext = "html" Or ext = "htm" Then
+            n = n + 1
+            ReDim Preserve arr(1 To n)
+            arr(n) = CStr(file.Path)
+        End If
+
+    Next file
+
+    If n = 0 Then
+        GetHtmlFilesSorted = Empty
+        Exit Function
+    End If
+
+    SortStringArray arr, LBound(arr), UBound(arr)
+
+    GetHtmlFilesSorted = arr
+
+End Function
+
+Private Sub SortStringArray( _
+        ByRef arr() As String, _
+        ByVal firstIdx As Long, _
+        ByVal lastIdx As Long _
+    )
+
+    Dim i As Long
+    Dim j As Long
+    Dim key As String
+
+    For i = firstIdx + 1 To lastIdx
+
+        key = arr(i)
+        j = i - 1
+
+        Do While j >= firstIdx And LCase(arr(j)) > LCase(key)
+            arr(j + 1) = arr(j)
+            j = j - 1
+        Loop
+
+        arr(j + 1) = key
+
+    Next i
+
+End Sub
+
+Private Function CombineHtmlFilesByFive( _
+        ByVal htmlFiles As Variant, _
+        ByVal htmlCombineDir As String _
+    ) As Long
+
+    Dim groupSize As Long
+    Dim i As Long
+    Dim j As Long
+    Dim groupNo As Long
+    Dim lastIdx As Long
+    Dim groupEnd As Long
+    Dim outPath As String
+    Dim combinedHtml As String
+    Dim onePath As String
+    Dim oneRaw As String
+    Dim oneBody As String
+    Dim fso As Object
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    groupSize = 5
+
+    EnsureFolderExists htmlCombineDir
+
+    lastIdx = UBound(htmlFiles)
+
+    groupNo = 0
+
+    For i = LBound(htmlFiles) To lastIdx Step groupSize
+
+        groupNo = groupNo + 1
+        groupEnd = MinLong(i + groupSize - 1, lastIdx)
+
+        combinedHtml = ""
+        combinedHtml = combinedHtml & "<!doctype html>" & vbCrLf
+        combinedHtml = combinedHtml & "<html lang=""ja"">" & vbCrLf
+        combinedHtml = combinedHtml & "<head>" & vbCrLf
+        combinedHtml = combinedHtml & "<meta charset=""utf-8"">" & vbCrLf
+        combinedHtml = combinedHtml & "<meta name=""viewport"" content=""width=device-width, initial-scale=1"">" & vbCrLf
+        combinedHtml = combinedHtml & "<title>HTML_COMBINE_" & Format(groupNo, "000") & "</title>" & vbCrLf
+        combinedHtml = combinedHtml & CombinedHtmlCss() & vbCrLf
+        combinedHtml = combinedHtml & "</head>" & vbCrLf
+        combinedHtml = combinedHtml & "<body>" & vbCrLf
+        combinedHtml = combinedHtml & "<main class=""page"">" & vbCrLf
+        combinedHtml = combinedHtml & "<header class=""combine-header"">" & vbCrLf
+        combinedHtml = combinedHtml & "<div class=""label"">HTML COMBINE</div>" & vbCrLf
+        combinedHtml = combinedHtml & "<h1>結合HTML " & Format(groupNo, "000") & "</h1>" & vbCrLf
+        combinedHtml = combinedHtml & "<div class=""meta"">" & _
+                        CStr(i) & "件目〜" & CStr(groupEnd) & _
+                        "件目 / 全" & CStr(lastIdx) & "件</div>" & vbCrLf
+        combinedHtml = combinedHtml & "</header>" & vbCrLf
+
+        For j = i To groupEnd
+
+            onePath = CStr(htmlFiles(j))
+
+            If fso.FileExists(onePath) Then
+
+                oneRaw = ReadTextUtf8(onePath)
+                oneBody = ExtractBodyInnerHtml(oneRaw)
+
+                oneBody = PrefixRelativeLinksForCombinedHtml(oneBody, "../" & DIR_HTML & "/")
+
+                combinedHtml = combinedHtml & "<section class=""combined-doc"">" & vbCrLf
+                combinedHtml = combinedHtml & "<div class=""source-title"">" & _
+                                HtmlEscape(fso.GetFileName(onePath)) & _
+                                "</div>" & vbCrLf
+                combinedHtml = combinedHtml & oneBody & vbCrLf
+                combinedHtml = combinedHtml & "</section>" & vbCrLf
+
+            End If
+
+        Next j
+
+        combinedHtml = combinedHtml & "</main>" & vbCrLf
+        combinedHtml = combinedHtml & "</body>" & vbCrLf
+        combinedHtml = combinedHtml & "</html>" & vbCrLf
+
+        outPath = CombinePath(htmlCombineDir, "HTML_COMBINE_" & Format(groupNo, "000") & ".html")
+        outPath = UniqueFilePath(outPath)
+
+        WriteTextUtf8 outPath, combinedHtml
+
+    Next i
+
+    CombineHtmlFilesByFive = groupNo
+
+End Function
+
+Private Function CombinedHtmlCss() As String
+
+    Dim s As String
+
+    s = ""
+    s = s & "<style>" & vbCrLf
+    s = s & "html{background:#eef2f7;color:#111827;}" & vbCrLf
+    s = s & "body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Yu Gothic','Meiryo','Segoe UI',sans-serif;line-height:1.85;}" & vbCrLf
+    s = s & ".page{max-width:1080px;margin:32px auto;padding:40px;background:#fff;border-radius:18px;box-shadow:0 12px 36px rgba(15,23,42,.12);}" & vbCrLf
+    s = s & ".combine-header{border-bottom:2px solid #d1d5db;margin-bottom:28px;padding-bottom:18px;}" & vbCrLf
+    s = s & ".label{font-size:12px;letter-spacing:.14em;color:#6b7280;font-weight:700;margin-bottom:8px;}" & vbCrLf
+    s = s & "h1{font-size:28px;line-height:1.35;margin:0 0 8px 0;color:#0f172a;}" & vbCrLf
+    s = s & ".meta{font-size:13px;color:#6b7280;}" & vbCrLf
+    s = s & ".combined-doc{padding:28px 0;border-top:1px dashed #cbd5e1;}" & vbCrLf
+    s = s & ".combined-doc:first-of-type{border-top:none;}" & vbCrLf
+    s = s & ".source-title{position:sticky;top:0;background:#111827;color:#fff;padding:8px 12px;border-radius:10px;font-size:13px;font-weight:700;margin-bottom:16px;z-index:1;}" & vbCrLf
+    s = s & "p{margin:.65em 0;}" & vbCrLf
+    s = s & "h1,h2,h3{line-height:1.45;margin-top:1.4em;color:#111827;}" & vbCrLf
+    s = s & "table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14px;}" & vbCrLf
+    s = s & "th,td{border:1px solid #d1d5db;padding:8px 10px;vertical-align:top;}" & vbCrLf
+    s = s & "th{background:#f9fafb;font-weight:700;}" & vbCrLf
+    s = s & "img{max-width:100%;height:auto;display:block;margin:16px auto;}" & vbCrLf
+    s = s & "pre{white-space:pre-wrap;background:#f9fafb;border:1px solid #e5e7eb;padding:16px;border-radius:12px;}" & vbCrLf
+    s = s & "a{color:#2563eb;text-decoration:none;}" & vbCrLf
+    s = s & "a:hover{text-decoration:underline;}" & vbCrLf
+    s = s & "@media print{html{background:#fff}.page{margin:0;box-shadow:none;border-radius:0}.source-title{position:static}}" & vbCrLf
+    s = s & "</style>" & vbCrLf
+
+    CombinedHtmlCss = s
+
+End Function
+
+Private Function ExtractBodyInnerHtml(ByVal html As String) As String
+
+    Dim lowerHtml As String
+    Dim bodyStart As Long
+    Dim bodyStartClose As Long
+    Dim bodyEnd As Long
+
+    lowerHtml = LCase(html)
+
+    bodyStart = InStr(1, lowerHtml, "<body")
+
+    If bodyStart = 0 Then
+        ExtractBodyInnerHtml = html
+        Exit Function
+    End If
+
+    bodyStartClose = InStr(bodyStart, lowerHtml, ">")
+
+    If bodyStartClose = 0 Then
+        ExtractBodyInnerHtml = html
+        Exit Function
+    End If
+
+    bodyEnd = InStr(bodyStartClose + 1, lowerHtml, "</body>")
+
+    If bodyEnd = 0 Then
+        ExtractBodyInnerHtml = Mid(html, bodyStartClose + 1)
+    Else
+        ExtractBodyInnerHtml = Mid(html, bodyStartClose + 1, bodyEnd - bodyStartClose - 1)
+    End If
+
+End Function
+
+Private Function PrefixRelativeLinksForCombinedHtml( _
+        ByVal html As String, _
+        ByVal prefix As String _
+    ) As String
+
+    html = PrefixRelativeAttr(html, "src", prefix)
+    html = PrefixRelativeAttr(html, "href", prefix)
+
+    PrefixRelativeLinksForCombinedHtml = html
+
+End Function
+
+Private Function PrefixRelativeAttr( _
+        ByVal html As String, _
+        ByVal attrName As String, _
+        ByVal prefix As String _
+    ) As String
+
+    On Error GoTo ErrHandler
+
+    Dim re As Object
+    Dim matches As Object
+    Dim m As Object
+    Dim i As Long
+
+    Dim fullMatch As String
+    Dim quoteChar As String
+    Dim urlValue As String
+    Dim newMatch As String
+
+    Set re = CreateObject("VBScript.RegExp")
+
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "\b" & attrName & "\s*=\s*(""([^""]*)""|'([^']*)')"
+
+    Set matches = re.Execute(html)
+
+    For i = matches.Count - 1 To 0 Step -1
+
+        Set m = matches(i)
+
+        fullMatch = m.Value
+
+        If InStr(fullMatch, """") > 0 Then
+            quoteChar = """"
+            urlValue = CStr(m.SubMatches(1))
+        Else
+            quoteChar = "'"
+            urlValue = CStr(m.SubMatches(2))
+        End If
+
+        If ShouldPrefixRelativeUrl(urlValue) Then
+            newMatch = attrName & "=" & quoteChar & prefix & urlValue & quoteChar
+
+            html = Left(html, m.FirstIndex) & _
+                   newMatch & _
+                   Mid(html, m.FirstIndex + Len(fullMatch) + 1)
+        End If
+
+    Next i
+
+    PrefixRelativeAttr = html
+    Exit Function
+
+ErrHandler:
+    PrefixRelativeAttr = html
+
+End Function
+
+Private Function ShouldPrefixRelativeUrl(ByVal urlValue As String) As Boolean
+
+    Dim u As String
+
+    u = LCase(Trim(urlValue))
+
+    If Len(u) = 0 Then
+        ShouldPrefixRelativeUrl = False
+    ElseIf Left(u, 1) = "#" Then
+        ShouldPrefixRelativeUrl = False
+    ElseIf Left(u, 5) = "http:" Then
+        ShouldPrefixRelativeUrl = False
+    ElseIf Left(u, 6) = "https:" Then
+        ShouldPrefixRelativeUrl = False
+    ElseIf Left(u, 5) = "data:" Then
+        ShouldPrefixRelativeUrl = False
+    ElseIf Left(u, 7) = "mailto:" Then
+        ShouldPrefixRelativeUrl = False
+    ElseIf Left(u, 4) = "tel:" Then
+        ShouldPrefixRelativeUrl = False
+    ElseIf Left(u, 2) = "\\" Then
+        ShouldPrefixRelativeUrl = False
+    ElseIf Mid(u, 2, 2) = ":\" Then
+        ShouldPrefixRelativeUrl = False
+    ElseIf Left(u, 3) = "../" Then
+        ShouldPrefixRelativeUrl = False
+    ElseIf Left(u, 1) = "/" Then
+        ShouldPrefixRelativeUrl = False
+    Else
+        ShouldPrefixRelativeUrl = True
+    End If
+
+End Function
+
+' ============================================================
+' Excelハイパーリンク取得
+' ============================================================
+
+Private Function GetUrlFromCell(ByVal cell As Range) As String
+
+    On Error GoTo ErrHandler
+
+    If cell.Hyperlinks.Count > 0 Then
+
+        GetUrlFromCell = cell.Hyperlinks(1).Address
+
+        If Len(cell.Hyperlinks(1).SubAddress) > 0 Then
+            If Len(GetUrlFromCell) > 0 Then
+                GetUrlFromCell = GetUrlFromCell & "#" & cell.Hyperlinks(1).SubAddress
+            Else
+                GetUrlFromCell = cell.Hyperlinks(1).SubAddress
+            End If
+        End If
+
+    Else
+        GetUrlFromCell = Trim(CStr(cell.Value))
+    End If
+
+    Exit Function
+
+ErrHandler:
+    GetUrlFromCell = ""
+
+End Function
+
+Private Function IsHttpUrl(ByVal url As String) As Boolean
+
+    Dim u As String
+
+    u = LCase(Trim(url))
+
+    IsHttpUrl = _
+        Left(u, 7) = "http://" Or _
+        Left(u, 8) = "https://"
+
+End Function
+
+' ============================================================
+' ファイル・フォルダ・文字列共通
+' ============================================================
+
+Private Function NormalizeFolderPath(ByVal folderPath As String) As String
+
+    folderPath = Trim(folderPath)
+    folderPath = Replace(folderPath, """", "")
+
+    Do While Len(folderPath) > 3 And _
+        (Right(folderPath, 1) = "\" Or Right(folderPath, 1) = "/")
+        folderPath = Left(folderPath, Len(folderPath) - 1)
+    Loop
+
+    NormalizeFolderPath = folderPath
+
+End Function
+
+Private Function CombinePath( _
+        ByVal folderPath As String, _
+        ByVal fileName As String _
+    ) As String
+
+    If Right(folderPath, 1) = "\" Or Right(folderPath, 1) = "/" Then
+        CombinePath = folderPath & fileName
+    Else
+        CombinePath = folderPath & "\" & fileName
+    End If
+
+End Function
+
+Private Sub EnsureFolderExists(ByVal folderPath As String)
+
+    Dim fso As Object
+    Dim parentPath As String
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    folderPath = NormalizeFolderPath(folderPath)
+
+    If Len(folderPath) = 0 Then Exit Sub
+    If fso.FolderExists(folderPath) Then Exit Sub
+
+    parentPath = fso.GetParentFolderName(folderPath)
+
+    If Len(parentPath) > 0 Then
+        If Not fso.FolderExists(parentPath) Then
+            EnsureFolderExists parentPath
+        End If
+    End If
+
+    If Not fso.FolderExists(folderPath) Then
+        fso.CreateFolder folderPath
+    End If
+
+End Sub
+
+Private Function UniqueFilePath(ByVal filePath As String) As String
+
+    Dim fso As Object
+    Dim folderPath As String
+    Dim baseName As String
+    Dim ext As String
+    Dim i As Long
+    Dim candidate As String
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If Not fso.FileExists(filePath) Then
+        UniqueFilePath = filePath
+        Exit Function
+    End If
+
+    folderPath = fso.GetParentFolderName(filePath)
+    baseName = fso.GetBaseName(filePath)
+    ext = fso.GetExtensionName(filePath)
+
+    For i = 1 To 9999
+
+        If Len(ext) > 0 Then
+            candidate = folderPath & "\" & baseName & "_" & Format(i, "000") & "." & ext
+        Else
+            candidate = folderPath & "\" & baseName & "_" & Format(i, "000")
+        End If
+
+        If Not fso.FileExists(candidate) Then
+            UniqueFilePath = candidate
+            Exit Function
+        End If
+
+    Next i
+
+    UniqueFilePath = filePath
+
+End Function
+
+Private Function ReadTextUtf8(ByVal filePath As String) As String
+
+    On Error GoTo ErrHandler
+
+    Dim stream As Object
+
+    Set stream = CreateObject("ADODB.Stream")
+
+    With stream
+        .Type = 2
+        .Charset = "utf-8"
+        .Open
+        .LoadFromFile filePath
+        ReadTextUtf8 = .ReadText
+        .Close
+    End With
+
+    Exit Function
+
+ErrHandler:
+    ReadTextUtf8 = ""
+
+End Function
+
+Private Sub WriteTextUtf8( _
+        ByVal filePath As String, _
+        ByVal text As String _
+    )
+
+    Dim stream As Object
+
+    Set stream = CreateObject("ADODB.Stream")
+
+    With stream
+        .Type = 2
+        .Charset = "utf-8"
+        .Open
+        .WriteText text
+        .SaveToFile filePath, 2
+        .Close
+    End With
+
+End Sub
+
+Private Function HtmlEscape(ByVal s As String) As String
+
+    s = Replace(s, "&", "&amp;")
+    s = Replace(s, "<", "&lt;")
+    s = Replace(s, ">", "&gt;")
+    s = Replace(s, """", "&quot;")
+    s = Replace(s, "'", "&#39;")
+
+    HtmlEscape = s
+
+End Function
+
+Private Function QuoteArg(ByVal s As String) As String
+
+    QuoteArg = """" & Replace(s, """", """""") & """"
+
+End Function
+
+Private Function MinLong( _
+        ByVal a As Long, _
+        ByVal b As Long _
+    ) As Long
+
+    If a < b Then
+        MinLong = a
+    Else
+        MinLong = b
+    End If
+
+End Function
