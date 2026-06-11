@@ -1,24 +1,20 @@
 Option Explicit
 
 ' ============================================================
-' Excel側 軽量制御モジュール
+' 外部処理版 Excel制御VBA
 '
-' Excel/VBAは以下のみ担当:
-' - README作成
-' - 入力シート整形
-' - Sheet2 A2以降のハイパーリンクを消さずに整理
-' - ジョブTSV出力
-' - BAT起動
-' - 結果TSVの取込
+' 方針:
+'   - Excel/VBAは軽量制御のみ
+'   - 重い処理は BAT + PowerShell 側で実行
+'   - 02_LINKS A列は原本列として絶対に壊さない
+'   - A2以降のハイパーリンクは削除・再作成しない
+'   - URL抽出結果だけをB列に出す
 '
-' 重い処理:
-' - ダウンロード
-' - ZIP展開
-' - PDF化
-' - HTML化
-' - HTML結合
-'
-' は run_external_downloader.bat + external_downloader.ps1 側で実行する。
+' 主な実行マクロ:
+'   1. SetupExternalDownloaderWorkbook
+'   2. RefreshLinkUrlColumn
+'   3. LaunchExternalDownloadExtractPdfHtml
+'   4. ImportLatestExternalResults
 ' ============================================================
 
 Private Const SETTINGS_SHEET_NAME As String = "01_SETTINGS"
@@ -61,7 +57,7 @@ Public Sub SetupExternalDownloaderWorkbook()
     Set wsReadme = EnsureSheetByName(README_SHEET_NAME)
 
     BuildSettingsSheet wsCfg
-    BuildLinksSheetPreserveData wsLinks
+    BuildLinksSheetNonDestructive wsLinks
     BuildReadmeSheet wsReadme
 
     wsCfg.Activate
@@ -72,7 +68,8 @@ Public Sub SetupExternalDownloaderWorkbook()
 
     MsgBox _
         "セットアップが完了しました。" & vbCrLf & _
-        "01_SETTINGS の A1〜A3 と、02_LINKS の A2以降を入力してください。", _
+        "01_SETTINGS の A1〜A3 と、02_LINKS の A2以降を入力してください。" & vbCrLf & _
+        "02_LINKS のA列は原本列として保持されます。", _
         vbInformation
 
     Exit Sub
@@ -87,7 +84,98 @@ ErrHandler:
 End Sub
 
 ' ============================================================
-' 外部実行
+' リンクURL抽出
+'
+' 重要:
+'   A列は消さない
+'   A列のHyperlinkを削除しない
+'   A列のHyperlinkを再作成しない
+'   抽出URLのみB列に表示
+' ============================================================
+
+Public Sub RefreshLinkUrlColumn(Optional ByVal showMessage As Boolean = True)
+
+    Dim wsLinks As Worksheet
+    Dim lastRow As Long
+    Dim r As Long
+    Dim url As String
+    Dim label As String
+
+    On Error GoTo ErrHandler
+
+    Set wsLinks = ThisWorkbook.Worksheets(2)
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+
+    BuildLinksSheetNonDestructive wsLinks
+
+    lastRow = GetLastUsedRowInColumn(wsLinks, "A")
+
+    If lastRow < FIRST_LINK_ROW Then
+        GoTo Finally
+    End If
+
+    ' B:Gは結果列なのでクリアしてよい
+    wsLinks.Range("B" & FIRST_LINK_ROW & ":G" & lastRow).ClearContents
+    wsLinks.Range("B" & FIRST_LINK_ROW & ":G" & lastRow).ClearFormats
+
+    For r = FIRST_LINK_ROW To lastRow
+
+        url = ResolveDownloadUrlFromCell(wsLinks.Cells(r, "A"))
+        label = SafeCellText(wsLinks.Cells(r, "A"))
+
+        If Len(url) > 0 Then
+            wsLinks.Cells(r, "B").Value = url
+            wsLinks.Cells(r, "G").Value = "URL抽出OK"
+        Else
+            If Len(label) > 0 Then
+                wsLinks.Cells(r, "G").Value = "URL抽出不可"
+            End If
+        End If
+
+        StyleLinkInputRow wsLinks, r
+
+    Next r
+
+    StyleResultColumns wsLinks, lastRow
+
+Finally:
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+
+    If showMessage Then
+        MsgBox _
+            "URL抽出が完了しました。" & vbCrLf & _
+            "A列のリンク・表示文字列は変更していません。" & vbCrLf & _
+            "抽出URLはB列に表示しています。", _
+            vbInformation
+    End If
+
+    Exit Sub
+
+ErrHandler:
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+
+    MsgBox _
+        "URL抽出中にエラーが発生しました。" & vbCrLf & _
+        "行: " & r & vbCrLf & _
+        "内容: " & Err.Description, _
+        vbExclamation
+
+End Sub
+
+' 旧名称互換用
+Public Sub CleanLinkSheetPreserveHyperlinks(Optional ByVal showMessage As Boolean = True)
+    RefreshLinkUrlColumn showMessage
+End Sub
+
+' ============================================================
+' 外部処理起動
 ' ============================================================
 
 Public Sub LaunchExternalDownloadExtractPdfHtml()
@@ -150,15 +238,16 @@ Public Sub LaunchExternalDownloadExtractPdfHtml()
         Exit Sub
     End If
 
-    ' リンクを消さずに整形する
-    CleanLinkSheetPreserveHyperlinks False
+    ' A列を壊さず、B列にURLだけ抽出
+    RefreshLinkUrlColumn False
 
     jobPath = ExportJobTsv(wsLinks, rootDir)
 
     If Len(jobPath) = 0 Then
         MsgBox _
             "処理対象URLがありません。" & vbCrLf & _
-            "02_LINKS の A2以降にハイパーリンクまたはURL文字列を入力してください。", _
+            "02_LINKS の A2以降に、ハイパーリンクまたはURL文字列を入力してください。" & vbCrLf & _
+            "B列にURLが抽出されているかも確認してください。", _
             vbExclamation
         Exit Sub
     End If
@@ -184,7 +273,7 @@ Public Sub LaunchExternalDownloadExtractPdfHtml()
     MsgBox _
         "外部処理を起動しました。" & vbCrLf & _
         "進捗は起動した黒い画面に表示されます。" & vbCrLf & _
-        "完了後、必要に応じて ImportLatestExternalResults を実行してください。", _
+        "完了後、ImportLatestExternalResults を実行してください。", _
         vbInformation
 
     Exit Sub
@@ -245,131 +334,33 @@ ErrHandler:
 End Sub
 
 ' ============================================================
-' Sheet2 A2以降のリンクを消さずに整形
+' 結果欄だけクリア
 ' ============================================================
 
-Public Sub CleanLinkSheetPreserveHyperlinks(Optional ByVal showMessage As Boolean = True)
+Public Sub ClearResultsOnly()
 
     Dim wsLinks As Worksheet
     Dim lastRow As Long
-    Dim r As Long
-
-    Dim displayText As String
-    Dim address As String
-    Dim subAddress As String
-
-    Dim c As Range
 
     On Error GoTo ErrHandler
 
     Set wsLinks = ThisWorkbook.Worksheets(2)
 
-    Application.ScreenUpdating = False
-    Application.EnableEvents = False
-    Application.DisplayAlerts = False
+    lastRow = Application.WorksheetFunction.Max( _
+                GetLastUsedRowInColumn(wsLinks, "A"), _
+                GetLastUsedRowInColumn(wsLinks, "G") _
+              )
 
-    lastRow = wsLinks.Cells(wsLinks.Rows.Count, "A").End(xlUp).Row
+    If lastRow < FIRST_LINK_ROW Then Exit Sub
 
-    If lastRow < FIRST_LINK_ROW Then
-        BuildLinksSheetPreserveData wsLinks
-        GoTo Finally
-    End If
+    wsLinks.Range("B" & FIRST_LINK_ROW & ":G" & lastRow).ClearContents
 
-    For r = FIRST_LINK_ROW To lastRow
-
-        Set c = wsLinks.Cells(r, "A")
-
-        displayText = ""
-        address = ""
-        subAddress = ""
-
-        GetCellTextAndHyperlink c, displayText, address, subAddress
-
-        If Len(displayText) = 0 And Len(address) > 0 Then
-            displayText = address
-        End If
-
-        If Len(address) = 0 And IsHttpUrl(displayText) Then
-            address = displayText
-        End If
-
-        ' ここでセル自体は消さず、内容とリンクを作り直す
-        c.Hyperlinks.Delete
-        c.ClearFormats
-        c.NumberFormat = "@"
-
-        If Len(displayText) > 0 Or Len(address) > 0 Or Len(subAddress) > 0 Then
-
-            c.Value = displayText
-
-            If Len(address) > 0 Or Len(subAddress) > 0 Then
-                wsLinks.Hyperlinks.Add _
-                    Anchor:=c, _
-                    Address:=address, _
-                    SubAddress:=subAddress, _
-                    TextToDisplay:=displayText
-            End If
-
-        Else
-            c.ClearContents
-        End If
-
-    Next r
-
-    BuildLinksSheetPreserveData wsLinks
-
-Finally:
-    Application.DisplayAlerts = True
-    Application.EnableEvents = True
-    Application.ScreenUpdating = True
-
-    If showMessage Then
-        MsgBox "02_LINKS A2以降を、テキストとハイパーリンクのみ保持する形に整理しました。", vbInformation
-    End If
+    MsgBox "B〜G列の結果欄だけクリアしました。A列は変更していません。", vbInformation
 
     Exit Sub
 
 ErrHandler:
-    Application.DisplayAlerts = True
-    Application.EnableEvents = True
-    Application.ScreenUpdating = True
-
-    MsgBox "リンク整理中にエラーが発生しました: " & Err.Description, vbExclamation
-
-End Sub
-
-' ============================================================
-' 外部更新リンク解除
-' ============================================================
-
-Public Sub BreakExternalUpdateLinksOnly()
-
-    Dim links As Variant
-    Dim i As Long
-    Dim count As Long
-
-    On Error GoTo ErrHandler
-
-    links = ThisWorkbook.LinkSources(Type:=xlLinkTypeExcelLinks)
-
-    If IsEmpty(links) Then
-        MsgBox "外部更新リンクは見つかりませんでした。", vbInformation
-        Exit Sub
-    End If
-
-    For i = LBound(links) To UBound(links)
-        ThisWorkbook.BreakLink _
-            Name:=CStr(links(i)), _
-            Type:=xlLinkTypeExcelLinks
-        count = count + 1
-    Next i
-
-    MsgBox "外部更新リンクを " & count & " 件解除しました。", vbInformation
-
-    Exit Sub
-
-ErrHandler:
-    MsgBox "外部更新リンク解除中にエラーが発生しました: " & Err.Description, vbExclamation
+    MsgBox "結果欄クリア中にエラーが発生しました: " & Err.Description, vbExclamation
 
 End Sub
 
@@ -386,39 +377,28 @@ Private Function ExportJobTsv( _
     Dim jobPath As String
     Dim lastRow As Long
     Dim r As Long
-
-    Dim displayText As String
-    Dim address As String
-    Dim subAddress As String
     Dim url As String
-
     Dim lines As String
     Dim count As Long
 
     workDir = CombinePath(rootDir, DIR_WORK)
     EnsureFolderExists workDir
 
-    lastRow = wsLinks.Cells(wsLinks.Rows.Count, "A").End(xlUp).Row
+    lastRow = GetLastUsedRowInColumn(wsLinks, "A")
 
     For r = FIRST_LINK_ROW To lastRow
 
-        displayText = ""
-        address = ""
-        subAddress = ""
-
-        GetCellTextAndHyperlink wsLinks.Cells(r, "A"), displayText, address, subAddress
-
-        url = address
-
-        If Len(url) = 0 And IsHttpUrl(displayText) Then
-            url = displayText
-        End If
+        url = ResolveDownloadUrlFromCell(wsLinks.Cells(r, "A"))
 
         If IsHttpUrl(url) Then
             count = count + 1
             lines = lines & CStr(r) & vbTab & CleanTsvField(url) & vbCrLf
             wsLinks.Cells(r, "B").Value = url
             wsLinks.Cells(r, "G").Value = "外部処理待機"
+        Else
+            If Len(SafeCellText(wsLinks.Cells(r, "A"))) > 0 Then
+                wsLinks.Cells(r, "G").Value = "URL対象外"
+            End If
         End If
 
     Next r
@@ -436,6 +416,266 @@ Private Function ExportJobTsv( _
 End Function
 
 ' ============================================================
+' URL解決ロジック
+'
+' 優先順位:
+'   1. セルのHyperlinks(1).Address
+'   2. HYPERLINK関数内のURL
+'   3. セル値そのものがURL
+'   4. セル表示文字列中に含まれるURL
+'
+' 内部リンク、外部ブック参照、file://等は対象外
+' ============================================================
+
+Private Function ResolveDownloadUrlFromCell(ByVal cell As Range) As String
+
+    Dim s As String
+    Dim formulaText As String
+    Dim valueText As String
+    Dim textText As String
+
+    On Error GoTo SafeExit
+
+    ' 1. Excelハイパーリンクオブジェクト
+    s = SafeHyperlinkAddress(cell)
+    s = NormalizeUrlCandidate(s)
+
+    If IsHttpUrl(s) Then
+        ResolveDownloadUrlFromCell = s
+        Exit Function
+    End If
+
+    ' 2. HYPERLINK関数
+    formulaText = SafeCellFormula(cell)
+
+    If Len(formulaText) > 0 Then
+        s = ExtractFirstHttpUrl(formulaText)
+        s = NormalizeUrlCandidate(s)
+
+        If IsHttpUrl(s) Then
+            ResolveDownloadUrlFromCell = s
+            Exit Function
+        End If
+    End If
+
+    ' 3. セル値
+    valueText = SafeCellValueAsText(cell)
+    s = NormalizeUrlCandidate(valueText)
+
+    If IsHttpUrl(s) Then
+        ResolveDownloadUrlFromCell = s
+        Exit Function
+    End If
+
+    ' 4. 表示文字列中のURL
+    textText = SafeCellText(cell)
+    s = ExtractFirstHttpUrl(textText)
+    s = NormalizeUrlCandidate(s)
+
+    If IsHttpUrl(s) Then
+        ResolveDownloadUrlFromCell = s
+        Exit Function
+    End If
+
+SafeExit:
+    ResolveDownloadUrlFromCell = ""
+
+End Function
+
+Private Function SafeHyperlinkAddress(ByVal cell As Range) As String
+
+    On Error GoTo ErrHandler
+
+    If cell.Hyperlinks.Count > 0 Then
+        SafeHyperlinkAddress = CStr(cell.Hyperlinks(1).Address)
+    Else
+        SafeHyperlinkAddress = ""
+    End If
+
+    Exit Function
+
+ErrHandler:
+    SafeHyperlinkAddress = ""
+
+End Function
+
+Private Function SafeHyperlinkSubAddress(ByVal cell As Range) As String
+
+    On Error GoTo ErrHandler
+
+    If cell.Hyperlinks.Count > 0 Then
+        SafeHyperlinkSubAddress = CStr(cell.Hyperlinks(1).SubAddress)
+    Else
+        SafeHyperlinkSubAddress = ""
+    End If
+
+    Exit Function
+
+ErrHandler:
+    SafeHyperlinkSubAddress = ""
+
+End Function
+
+Private Function SafeCellFormula(ByVal cell As Range) As String
+
+    On Error GoTo ErrHandler
+
+    If cell.HasFormula Then
+        SafeCellFormula = CStr(cell.Formula)
+    Else
+        SafeCellFormula = ""
+    End If
+
+    Exit Function
+
+ErrHandler:
+    SafeCellFormula = ""
+
+End Function
+
+Private Function SafeCellValueAsText(ByVal cell As Range) As String
+
+    On Error GoTo ErrHandler
+
+    If IsError(cell.Value) Then
+        SafeCellValueAsText = ""
+    Else
+        SafeCellValueAsText = Trim(CStr(cell.Value))
+    End If
+
+    Exit Function
+
+ErrHandler:
+    SafeCellValueAsText = ""
+
+End Function
+
+Private Function SafeCellText(ByVal cell As Range) As String
+
+    On Error GoTo ErrHandler
+
+    If IsError(cell.Value) Then
+        SafeCellText = ""
+    Else
+        SafeCellText = Trim(CStr(cell.Value))
+    End If
+
+    If Len(SafeCellText) = 0 Then
+        SafeCellText = Trim(CStr(cell.Text))
+    End If
+
+    Exit Function
+
+ErrHandler:
+    On Error Resume Next
+    SafeCellText = Trim(CStr(cell.Text))
+    On Error GoTo 0
+
+End Function
+
+Private Function ExtractFirstHttpUrl(ByVal text As String) As String
+
+    Dim re As Object
+    Dim matches As Object
+    Dim s As String
+
+    On Error GoTo ErrHandler
+
+    If Len(text) = 0 Then
+        ExtractFirstHttpUrl = ""
+        Exit Function
+    End If
+
+    Set re = CreateObject("VBScript.RegExp")
+
+    With re
+        .Global = False
+        .IgnoreCase = True
+        .Pattern = "https?://[^\s""'<>）)】］、，,]+"
+    End With
+
+    Set matches = re.Execute(text)
+
+    If matches.Count > 0 Then
+        s = CStr(matches(0).Value)
+        ExtractFirstHttpUrl = StripUrlTrailingMarks(s)
+    Else
+        ExtractFirstHttpUrl = ""
+    End If
+
+    Exit Function
+
+ErrHandler:
+    ExtractFirstHttpUrl = ""
+
+End Function
+
+Private Function NormalizeUrlCandidate(ByVal s As String) As String
+
+    s = Trim(CStr(s))
+
+    If Len(s) = 0 Then
+        NormalizeUrlCandidate = ""
+        Exit Function
+    End If
+
+    s = Replace(s, vbCr, "")
+    s = Replace(s, vbLf, "")
+    s = Replace(s, vbTab, "")
+    s = Replace(s, """", "")
+
+    s = Trim(s)
+
+    If Left(s, 1) = "<" And Right(s, 1) = ">" Then
+        s = Mid(s, 2, Len(s) - 2)
+    End If
+
+    s = StripUrlTrailingMarks(s)
+
+    If IsHttpUrl(s) Then
+        NormalizeUrlCandidate = s
+    Else
+        NormalizeUrlCandidate = ""
+    End If
+
+End Function
+
+Private Function StripUrlTrailingMarks(ByVal s As String) As String
+
+    Dim lastChar As String
+
+    s = Trim(s)
+
+    Do While Len(s) > 0
+
+        lastChar = Right(s, 1)
+
+        Select Case lastChar
+            Case ".", ",", "、", "。", ")", "）", "]", "］", "】", ">", ";", "；"
+                s = Left(s, Len(s) - 1)
+            Case Else
+                Exit Do
+        End Select
+
+    Loop
+
+    StripUrlTrailingMarks = s
+
+End Function
+
+Private Function IsHttpUrl(ByVal s As String) As Boolean
+
+    Dim u As String
+
+    u = LCase(Trim(s))
+
+    IsHttpUrl = _
+        Left(u, 7) = "http://" Or _
+        Left(u, 8) = "https://"
+
+End Function
+
+' ============================================================
 ' シート作成・整形
 ' ============================================================
 
@@ -444,10 +684,12 @@ Private Sub BuildSettingsSheet(ByVal ws As Worksheet)
     Dim proxyVal As String
     Dim rootVal As String
     Dim workerVal As String
+    Dim jobVal As String
 
     proxyVal = Trim(CStr(ws.Range("A1").Value))
     rootVal = Trim(CStr(ws.Range("A2").Value))
     workerVal = Trim(CStr(ws.Range("A3").Value))
+    jobVal = Trim(CStr(ws.Range("A5").Value))
 
     If Len(workerVal) = 0 Then workerVal = CStr(DEFAULT_WORKER_COUNT)
 
@@ -456,6 +698,7 @@ Private Sub BuildSettingsSheet(ByVal ws As Worksheet)
     ws.Range("A1").Value = proxyVal
     ws.Range("A2").Value = rootVal
     ws.Range("A3").Value = workerVal
+    ws.Range("A5").Value = jobVal
 
     ws.Range("B1").Value = "プロキシアドレス"
     ws.Range("B2").Value = "出力先ルートフォルダ"
@@ -488,7 +731,7 @@ Private Sub BuildSettingsSheet(ByVal ws As Worksheet)
     ws.Range("A17").Value = "2"
     ws.Range("B17").Value = "02_LINKS の A2以降にリンクを貼る"
     ws.Range("A18").Value = "3"
-    ws.Range("B18").Value = "CleanLinkSheetPreserveHyperlinks を実行"
+    ws.Range("B18").Value = "RefreshLinkUrlColumn を実行してB列にURL抽出"
     ws.Range("A19").Value = "4"
     ws.Range("B19").Value = "LaunchExternalDownloadExtractPdfHtml を実行"
     ws.Range("A20").Value = "5"
@@ -507,7 +750,7 @@ Private Sub BuildSettingsSheet(ByVal ws As Worksheet)
     ws.Range("A15:B20").Borders.LineStyle = xlContinuous
 
     ws.Columns("A").ColumnWidth = 28
-    ws.Columns("B").ColumnWidth = 34
+    ws.Columns("B").ColumnWidth = 42
     ws.Columns("C").ColumnWidth = 90
     ws.Range("C1:C3").WrapText = True
     ws.Range("B16:B20").WrapText = True
@@ -524,14 +767,17 @@ Private Sub BuildSettingsSheet(ByVal ws As Worksheet)
 
 End Sub
 
-Private Sub BuildLinksSheetPreserveData(ByVal ws As Worksheet)
+Private Sub BuildLinksSheetNonDestructive(ByVal ws As Worksheet)
 
     On Error Resume Next
     ws.Name = LINKS_SHEET_NAME
     On Error GoTo 0
 
-    ws.Range("A1").Value = "ダウンロード対象リンク"
-    ws.Range("B1").Value = "URL"
+    ' A2以降は絶対に消さない。
+    ' ヘッダと列幅・説明だけ整備する。
+
+    ws.Range("A1").Value = "ダウンロード対象リンク（原本・消さない）"
+    ws.Range("B1").Value = "抽出URL"
     ws.Range("C1").Value = "ダウンロード先"
     ws.Range("D1").Value = "展開先"
     ws.Range("E1").Value = "PDF結果"
@@ -541,7 +787,7 @@ Private Sub BuildLinksSheetPreserveData(ByVal ws As Worksheet)
     StyleHeader ws.Range("A1:G1")
 
     ws.Columns("A").ColumnWidth = 70
-    ws.Columns("B").ColumnWidth = 70
+    ws.Columns("B").ColumnWidth = 80
     ws.Columns("C").ColumnWidth = 45
     ws.Columns("D").ColumnWidth = 45
     ws.Columns("E").ColumnWidth = 35
@@ -550,21 +796,59 @@ Private Sub BuildLinksSheetPreserveData(ByVal ws As Worksheet)
 
     ws.Columns("A:G").WrapText = True
 
-    ws.Range("A:A").Interior.Color = RGB(255, 255, 204)
-    ws.Range("B:G").Interior.Color = RGB(248, 248, 248)
+    ws.Range("A1:A1").Interior.Color = RGB(64, 64, 64)
+    ws.Range("B1:G1").Interior.Color = RGB(64, 64, 64)
 
     ws.Range("I1").Value = "入力ルール"
     ws.Range("I2").Value = "A2以降に、ダウンロード対象リンクを貼り付けてください。"
-    ws.Range("I3").Value = "貼り付け後に CleanLinkSheetPreserveHyperlinks を実行すると、A2以降を消さずに、テキストとハイパーリンクのみ保持します。"
-    ws.Range("I4").Value = "B〜G列は処理結果出力欄です。手入力不要です。"
-    ws.Range("I1:I4").Interior.Color = RGB(242, 242, 242)
+    ws.Range("I3").Value = "A列は原本列です。VBAはA2以降のリンクを削除・再作成しません。"
+    ws.Range("I4").Value = "RefreshLinkUrlColumn を実行すると、抽出URLだけがB列に出ます。"
+    ws.Range("I5").Value = "B〜G列は処理結果欄です。手入力不要です。"
+
+    ws.Range("I1:I5").Interior.Color = RGB(242, 242, 242)
     ws.Range("I1").Font.Bold = True
-    ws.Range("I1:I4").WrapText = True
-    ws.Columns("I").ColumnWidth = 70
+    ws.Range("I1:I5").WrapText = True
+    ws.Columns("I").ColumnWidth = 76
 
     On Error Resume Next
     If ws.AutoFilterMode Then ws.AutoFilterMode = False
     ws.Range("A1:G1").AutoFilter
+    On Error GoTo 0
+
+End Sub
+
+Private Sub StyleLinkInputRow(ByVal ws As Worksheet, ByVal rowNo As Long)
+
+    On Error Resume Next
+
+    With ws.Range("A" & rowNo & ":G" & rowNo)
+        .VerticalAlignment = xlVAlignTop
+        .WrapText = True
+    End With
+
+    ws.Cells(rowNo, "A").Interior.Color = RGB(255, 255, 204)
+    ws.Cells(rowNo, "B").Interior.Color = RGB(235, 247, 255)
+    ws.Range("C" & rowNo & ":G" & rowNo).Interior.Color = RGB(248, 248, 248)
+
+    If Len(CStr(ws.Cells(rowNo, "B").Value)) > 0 Then
+        ws.Cells(rowNo, "B").Font.Color = RGB(5, 99, 193)
+    Else
+        ws.Cells(rowNo, "B").Font.Color = RGB(0, 0, 0)
+    End If
+
+    On Error GoTo 0
+
+End Sub
+
+Private Sub StyleResultColumns(ByVal ws As Worksheet, ByVal lastRow As Long)
+
+    On Error Resume Next
+
+    If lastRow >= FIRST_LINK_ROW Then
+        ws.Range("A1:G" & lastRow).Borders.LineStyle = xlContinuous
+        ws.Range("A" & FIRST_LINK_ROW & ":G" & lastRow).VerticalAlignment = xlVAlignTop
+    End If
+
     On Error GoTo 0
 
 End Sub
@@ -598,7 +882,7 @@ Private Sub BuildReadmeSheet(ByVal ws As Worksheet)
     ws.Range("A5:E5").Value = Array("01_SETTINGS", "A1", "プロキシアドレス", "任意", "例: proxy.example.go.jp:8080")
     ws.Range("A6:E6").Value = Array("01_SETTINGS", "A2", "出力先ルートフォルダ", "必須", "ZIP / EXTRACT / PDF / HTML / HTML_COMBINE / WORK が作成されます")
     ws.Range("A7:E7").Value = Array("01_SETTINGS", "A3", "並列ワーカー数", "任意", "推奨 2〜3。最大8")
-    ws.Range("A8:E8").Value = Array("02_LINKS", "A2以降", "ダウンロード対象リンク", "必須", "ハイパーリンク付きセルまたはURL文字列")
+    ws.Range("A8:E8").Value = Array("02_LINKS", "A2以降", "ダウンロード対象リンク", "必須", "A列は原本列。VBAは削除・再作成しません。")
 
     ws.Range("A4:E8").Borders.LineStyle = xlContinuous
 
@@ -609,25 +893,26 @@ Private Sub BuildReadmeSheet(ByVal ws As Worksheet)
     StyleHeader ws.Range("A11:C11")
 
     ws.Range("A12:C12").Value = Array("SetupExternalDownloaderWorkbook", "README・入力シートを作成/整形", "初回")
-    ws.Range("A13:C13").Value = Array("CleanLinkSheetPreserveHyperlinks", "A2以降を消さずにリンク整理", "リンク貼付後")
-    ws.Range("A14:C14").Value = Array("LaunchExternalDownloadExtractPdfHtml", "BAT/PowerShellを外部起動", "リンク入力後")
+    ws.Range("A13:C13").Value = Array("RefreshLinkUrlColumn", "A列を壊さずにURLだけB列へ抽出", "リンク貼付後")
+    ws.Range("A14:C14").Value = Array("LaunchExternalDownloadExtractPdfHtml", "BAT/PowerShellを外部起動", "URL抽出後")
     ws.Range("A15:C15").Value = Array("ImportLatestExternalResults", "最新結果をExcelへ取込", "外部処理完了後")
-    ws.Range("A16:C16").Value = Array("BreakExternalUpdateLinksOnly", "外部更新リンク解除", "Excel起動時に更新確認が出る場合")
+    ws.Range("A16:C16").Value = Array("ClearResultsOnly", "B〜G列の結果欄だけ削除", "再実行前など")
+    ws.Range("A17:C17").Value = Array("BreakExternalUpdateLinksOnly", "外部更新リンク解除", "Excel起動時に更新確認が出る場合")
 
-    ws.Range("A11:C16").Borders.LineStyle = xlContinuous
+    ws.Range("A11:C17").Borders.LineStyle = xlContinuous
 
-    ws.Range("A18").Value = "3. 重要な注意"
-    StyleSection ws.Range("A18:H18")
+    ws.Range("A19").Value = "3. 重要な注意"
+    StyleSection ws.Range("A19:H19")
 
-    ws.Range("A19").Value = "・重い処理はExcelではなく、外部のBAT/PowerShellで実行します。Excelは固まりにくくなります。"
-    ws.Range("A20").Value = "・純BATだけでWinHTTP COMを直接扱うのは難しいため、BATは起動係、PowerShellがWinHttp.WinHttpRequest.5.1を使います。"
-    ws.Range("A21").Value = "・02_LINKS A2以降は、CleanLinkSheetPreserveHyperlinks で表示文字列とハイパーリンクだけを保持します。"
-    ws.Range("A22").Value = "・PDF化/HTML化ではMicrosoft Wordを外部PowerShell側で遅延起動します。"
-    ws.Range("A23").Value = "・run_external_downloader.bat と external_downloader.ps1 は、Excelと同じフォルダまたは出力先ルートフォルダに置いてください。"
+    ws.Range("A20").Value = "・02_LINKS A列は原本列です。今回のVBAはA2以降のリンクを削除・再作成しません。"
+    ws.Range("A21").Value = "・RefreshLinkUrlColumn は、A列からURLを抽出してB列に表示するだけです。"
+    ws.Range("A22").Value = "・HYPERLINK関数、通常ハイパーリンク、URL文字列、文章中のURLを対象に抽出します。"
+    ws.Range("A23").Value = "・内部リンク、外部ブック参照、file:// などはダウンロード対象から除外します。"
+    ws.Range("A24").Value = "・重い処理はExcelではなく、外部のBAT/PowerShellで実行します。"
+    ws.Range("A25").Value = "・run_external_downloader.bat と external_downloader.ps1 は、Excelと同じフォルダまたは出力先ルートフォルダに置いてください。"
 
-    ws.Range("A19:H23").MergeCells = False
-    ws.Range("A19:H23").WrapText = True
-    ws.Range("A19:H23").Interior.Color = RGB(255, 255, 204)
+    ws.Range("A20:H25").WrapText = True
+    ws.Range("A20:H25").Interior.Color = RGB(255, 255, 204)
 
     ws.Columns("A").ColumnWidth = 42
     ws.Columns("B").ColumnWidth = 42
@@ -741,86 +1026,38 @@ Private Function ImportResultsFromRunDir( _
 End Function
 
 ' ============================================================
-' セルから表示文字列とハイパーリンクを取得
+' 外部更新リンク解除
 ' ============================================================
 
-Private Sub GetCellTextAndHyperlink( _
-        ByVal cell As Range, _
-        ByRef displayText As String, _
-        ByRef address As String, _
-        ByRef subAddress As String _
-    )
+Public Sub BreakExternalUpdateLinksOnly()
 
-    On Error Resume Next
-
-    displayText = ""
-
-    If IsError(cell.Value) Then
-        displayText = ""
-    Else
-        displayText = Trim(CStr(cell.Value))
-    End If
-
-    address = ""
-    subAddress = ""
-
-    If cell.Hyperlinks.Count > 0 Then
-
-        address = CStr(cell.Hyperlinks(1).Address)
-        subAddress = CStr(cell.Hyperlinks(1).SubAddress)
-
-        If Len(displayText) = 0 Then
-            displayText = CStr(cell.Hyperlinks(1).TextToDisplay)
-        End If
-
-    End If
-
-    If Len(address) = 0 And cell.HasFormula Then
-        TryParseHyperlinkFormula CStr(cell.Formula), address, displayText
-    End If
-
-    On Error GoTo 0
-
-End Sub
-
-Private Sub TryParseHyperlinkFormula( _
-        ByVal formulaText As String, _
-        ByRef address As String, _
-        ByRef displayText As String _
-    )
-
-    Dim re As Object
-    Dim matches As Object
+    Dim links As Variant
+    Dim i As Long
+    Dim count As Long
 
     On Error GoTo ErrHandler
 
-    If InStr(1, formulaText, "HYPERLINK", vbTextCompare) = 0 Then Exit Sub
+    links = ThisWorkbook.LinkSources(Type:=xlLinkTypeExcelLinks)
 
-    Set re = CreateObject("VBScript.RegExp")
-
-    With re
-        .Global = True
-        .IgnoreCase = True
-        .Pattern = """([^""]*)"""
-    End With
-
-    Set matches = re.Execute(formulaText)
-
-    If matches.Count >= 1 Then
-
-        address = CStr(matches(0).SubMatches(0))
-
-        If matches.Count >= 2 Then
-            displayText = CStr(matches(1).SubMatches(0))
-        ElseIf Len(displayText) = 0 Then
-            displayText = address
-        End If
-
+    If IsEmpty(links) Then
+        MsgBox "外部更新リンクは見つかりませんでした。", vbInformation
+        Exit Sub
     End If
+
+    For i = LBound(links) To UBound(links)
+        ThisWorkbook.BreakLink _
+            Name:=CStr(links(i)), _
+            Type:=xlLinkTypeExcelLinks
+        count = count + 1
+    Next i
+
+    MsgBox "外部更新リンクを " & count & " 件解除しました。", vbInformation
 
     Exit Sub
 
 ErrHandler:
+    MsgBox "外部更新リンク解除中にエラーが発生しました: " & Err.Description, vbExclamation
+
 End Sub
 
 ' ============================================================
@@ -1000,21 +1237,26 @@ Private Function CleanTsvField(ByVal s As String) As String
 
 End Function
 
-Private Function IsHttpUrl(ByVal s As String) As Boolean
-
-    Dim u As String
-
-    u = LCase(Trim(s))
-
-    IsHttpUrl = _
-        Left(u, 7) = "http://" Or _
-        Left(u, 8) = "https://"
-
-End Function
-
 Private Function QuoteArg(ByVal s As String) As String
 
     QuoteArg = """" & Replace(s, """", """""") & """"
+
+End Function
+
+Private Function GetLastUsedRowInColumn( _
+        ByVal ws As Worksheet, _
+        ByVal colLetter As String _
+    ) As Long
+
+    Dim r As Long
+
+    r = ws.Cells(ws.Rows.Count, colLetter).End(xlUp).Row
+
+    If r = 1 And Len(Trim(CStr(ws.Cells(1, colLetter).Value))) = 0 Then
+        GetLastUsedRowInColumn = 0
+    Else
+        GetLastUsedRowInColumn = r
+    End If
 
 End Function
 
