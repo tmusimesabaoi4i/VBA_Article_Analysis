@@ -1,0 +1,966 @@
+Option Explicit
+
+' ============================================================
+' README・入力シート整形・リンククリーニング用モジュール
+'
+' 実行:
+'   SetupDownloaderWorkbookReadmeAndLayout
+'
+' 補助実行:
+'   CleanLinkSheetOnly
+'   BreakExternalUpdateLinksOnly
+'
+' 前提:
+'   1枚目: 設定シート
+'     A1: プロキシアドレス
+'     A2: 出力先ルートフォルダ
+'     A3: 並列ワーカー数
+'
+'   2枚目: リンク一覧シート
+'     A1: 見出し
+'     A2以降: ハイパーリンク
+'
+' 注意:
+'   READMEシートは3枚目以降に配置します。
+'   既存の処理マクロが Worksheets(1), Worksheets(2) を参照していても壊れない構成です。
+' ============================================================
+
+Private Const SHEET_README_NAME As String = "README"
+
+Private Const FIRST_LINK_ROW As Long = 2
+Private Const DEFAULT_WORKER_COUNT As Long = 3
+Private Const MAX_WORKER_COUNT As Long = 6
+
+' True:
+'   ブック内の外部更新リンクを解除します。
+'   Sheet2の貼り付けで外部参照が混入する事故を避けたい場合は True 推奨。
+Private Const BREAK_EXTERNAL_WORKBOOK_LINKS_ON_SETUP As Boolean = True
+
+' 色
+Private Const COLOR_HEADER As Long = &H404040
+Private Const COLOR_INPUT As Long = &HE6FFFF
+Private Const COLOR_NOTE As Long = &HF2F2F2
+Private Const COLOR_WARN As Long = &HCCFFFF
+Private Const COLOR_BLUE_TEXT As Long = &HC05000
+
+' ============================================================
+' メイン
+' ============================================================
+
+Public Sub SetupDownloaderWorkbookReadmeAndLayout()
+
+    Dim wsCfg As Worksheet
+    Dim wsList As Worksheet
+    Dim wsReadme As Worksheet
+
+    Dim proxyVal As String
+    Dim rootVal As String
+    Dim workerVal As String
+
+    Dim linkTexts() As String
+    Dim linkAddresses() As String
+    Dim linkSubAddresses() As String
+    Dim linkCount As Long
+
+    Dim oldCalc As XlCalculation
+
+    On Error GoTo ErrHandler
+
+    oldCalc = Application.Calculation
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+    Application.StatusBar = "README・入力形式を整備中..."
+
+    ResolveMainSheets wsCfg, wsList
+
+    proxyVal = CellValueAsText(wsCfg.Range("A1"))
+    rootVal = CellValueAsText(wsCfg.Range("A2"))
+    workerVal = CellValueAsText(wsCfg.Range("A3"))
+
+    linkCount = CollectLinkRecords( _
+                    wsList, _
+                    linkTexts, _
+                    linkAddresses, _
+                    linkSubAddresses _
+                )
+
+    ResetWorksheetHard wsCfg
+    ResetWorksheetHard wsList
+
+    BuildConfigSheet wsCfg, proxyVal, rootVal, workerVal
+    BuildLinkSheet wsList, linkTexts, linkAddresses, linkSubAddresses, linkCount
+
+    Set wsReadme = EnsureReadmeSheet()
+    ResetWorksheetHard wsReadme
+    BuildReadmeSheet wsReadme
+
+    EnsureReadmeAfterMainSheets wsReadme
+
+    If BREAK_EXTERNAL_WORKBOOK_LINKS_ON_SETUP Then
+        BreakExternalWorkbookLinks False
+    End If
+
+    wsCfg.Activate
+
+    Application.StatusBar = False
+    Application.Calculation = oldCalc
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+
+    MsgBox _
+        "READMEと入力シートの整形が完了しました。" & vbCrLf & _
+        "Sheet2 A列は、テキストとハイパーリンクのみ保持する形に整理済みです。", _
+        vbInformation
+
+    Exit Sub
+
+ErrHandler:
+    Application.StatusBar = False
+    Application.Calculation = oldCalc
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+
+    MsgBox "整形処理でエラーが発生しました: " & Err.Description, vbExclamation
+
+End Sub
+
+' ============================================================
+' Sheet2 A列だけクリーニングしたい場合
+' ============================================================
+
+Public Sub CleanLinkSheetOnly()
+
+    Dim wsCfg As Worksheet
+    Dim wsList As Worksheet
+
+    Dim linkTexts() As String
+    Dim linkAddresses() As String
+    Dim linkSubAddresses() As String
+    Dim linkCount As Long
+
+    On Error GoTo ErrHandler
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+
+    ResolveMainSheets wsCfg, wsList
+
+    linkCount = CollectLinkRecords( _
+                    wsList, _
+                    linkTexts, _
+                    linkAddresses, _
+                    linkSubAddresses _
+                )
+
+    ResetWorksheetHard wsList
+    BuildLinkSheet wsList, linkTexts, linkAddresses, linkSubAddresses, linkCount
+
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+
+    MsgBox "Sheet2 A列を、テキストとハイパーリンクのみ保持する形に整理しました。", vbInformation
+
+    Exit Sub
+
+ErrHandler:
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+
+    MsgBox "リンク整理でエラーが発生しました: " & Err.Description, vbExclamation
+
+End Sub
+
+' ============================================================
+' 外部更新リンクだけ解除したい場合
+' ============================================================
+
+Public Sub BreakExternalUpdateLinksOnly()
+
+    BreakExternalWorkbookLinks True
+
+End Sub
+
+' ============================================================
+' メインシート解決
+' ============================================================
+
+Private Sub ResolveMainSheets( _
+        ByRef wsCfg As Worksheet, _
+        ByRef wsList As Worksheet _
+    )
+
+    Dim ws As Worksheet
+    Dim foundCount As Long
+
+    If ThisWorkbook.Worksheets.Count < 2 Then
+        ThisWorkbook.Worksheets.Add After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count)
+    End If
+
+    foundCount = 0
+
+    For Each ws In ThisWorkbook.Worksheets
+
+        If ws.Name <> SHEET_README_NAME Then
+
+            foundCount = foundCount + 1
+
+            If foundCount = 1 Then
+                Set wsCfg = ws
+            ElseIf foundCount = 2 Then
+                Set wsList = ws
+                Exit For
+            End If
+
+        End If
+
+    Next ws
+
+    If wsCfg Is Nothing Then
+        Set wsCfg = ThisWorkbook.Worksheets(1)
+    End If
+
+    If wsList Is Nothing Then
+        Set wsList = ThisWorkbook.Worksheets(2)
+    End If
+
+    ' 既存の処理マクロが Worksheets(1), Worksheets(2) を使っていても壊れないようにする
+    If wsCfg.Index <> 1 Then
+        wsCfg.Move Before:=ThisWorkbook.Worksheets(1)
+    End If
+
+    If wsList.Index <> 2 Then
+        wsList.Move After:=wsCfg
+    End If
+
+End Sub
+
+Private Function EnsureReadmeSheet() As Worksheet
+
+    Dim ws As Worksheet
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(SHEET_README_NAME)
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+        ws.Name = SHEET_README_NAME
+    End If
+
+    Set EnsureReadmeSheet = ws
+
+End Function
+
+Private Sub EnsureReadmeAfterMainSheets(ByVal wsReadme As Worksheet)
+
+    If wsReadme.Index <= 2 Then
+        wsReadme.Move After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count)
+    End If
+
+End Sub
+
+' ============================================================
+' 設定シート作成
+' ============================================================
+
+Private Sub BuildConfigSheet( _
+        ByVal ws As Worksheet, _
+        ByVal proxyVal As String, _
+        ByVal rootVal As String, _
+        ByVal workerVal As String _
+    )
+
+    On Error Resume Next
+    ws.Name = "01_SETTINGS"
+    On Error GoTo 0
+
+    If Len(workerVal) = 0 Then
+        workerVal = CStr(DEFAULT_WORKER_COUNT)
+    End If
+
+    ws.Range("A1").Value = proxyVal
+    ws.Range("A2").Value = rootVal
+    ws.Range("A3").Value = workerVal
+
+    ws.Range("B1").Value = "プロキシアドレス"
+    ws.Range("B2").Value = "出力先ルートフォルダ"
+    ws.Range("B3").Value = "並列ワーカー数"
+
+    ws.Range("C1").Value = "任意。例: proxy.example.go.jp:8080 / http://proxy.example.go.jp:8080"
+    ws.Range("C2").Value = "必須。例: C:\Users\ユーザ名\Downloads\download_output"
+    ws.Range("C3").Value = "任意。推奨: 2〜3。最大 " & MAX_WORKER_COUNT & "。Wordの安定性のため増やしすぎないこと。"
+
+    ws.Range("A5").Value = "出力フォルダ構成"
+    ws.Range("A6").Value = "ZIP"
+    ws.Range("A7").Value = "EXTRACT"
+    ws.Range("A8").Value = "PDF"
+    ws.Range("A9").Value = "HTML"
+    ws.Range("A10").Value = "HTML_COMBINE"
+    ws.Range("A11").Value = "WORK"
+
+    ws.Range("B6").Value = "ダウンロードしたZIP等を保存"
+    ws.Range("B7").Value = "ZIP展開結果"
+    ws.Range("B8").Value = "PDF化結果"
+    ws.Range("B9").Value = "Word等から作成したHTML"
+    ws.Range("B10").Value = "HTMLを5件ずつまとめた結合HTML"
+    ws.Range("B11").Value = "並列処理用の一時ジョブ・結果ファイル"
+
+    ws.Range("A13").Value = "実行順序"
+    ws.Range("A14").Value = "1"
+    ws.Range("B14").Value = "このシートの A1〜A3 を入力"
+    ws.Range("A15").Value = "2"
+    ws.Range("B15").Value = "Sheet2 の A2 以降にリンクを貼り付け"
+    ws.Range("A16").Value = "3"
+    ws.Range("B16").Value = "SetupDownloaderWorkbookReadmeAndLayout または CleanLinkSheetOnly で整形"
+    ws.Range("A17").Value = "4"
+    ws.Range("B17").Value = "RunParallelDownloadExtractPdfHtml を実行"
+
+    ws.Range("A1:A3").Interior.Color = RGB(255, 255, 204)
+    ws.Range("A1:A3").Font.Bold = True
+
+    ws.Range("B1:B3").Font.Bold = True
+    ws.Range("B1:C3").Interior.Color = RGB(242, 242, 242)
+
+    ws.Range("A5:B5").Merge
+    ws.Range("A5").Value = "出力フォルダ構成"
+    StyleSectionHeader ws.Range("A5:B5")
+
+    ws.Range("A13:B13").Merge
+    ws.Range("A13").Value = "実行順序"
+    StyleSectionHeader ws.Range("A13:B13")
+
+    ws.Range("A1:C3").Borders.LineStyle = xlContinuous
+    ws.Range("A6:B11").Borders.LineStyle = xlContinuous
+    ws.Range("A14:B17").Borders.LineStyle = xlContinuous
+
+    ws.Columns("A").ColumnWidth = 26
+    ws.Columns("B").ColumnWidth = 32
+    ws.Columns("C").ColumnWidth = 80
+
+    ws.Rows("1:17").VerticalAlignment = xlVAlignCenter
+    ws.Range("C1:C3").WrapText = True
+    ws.Range("B14:B17").WrapText = True
+
+    On Error Resume Next
+    ws.Range("A3").Validation.Delete
+    ws.Range("A3").Validation.Add _
+        Type:=xlValidateWholeNumber, _
+        AlertStyle:=xlValidAlertStop, _
+        Operator:=xlBetween, _
+        Formula1:="1", _
+        Formula2:=CStr(MAX_WORKER_COUNT)
+    ws.Range("A3").Validation.ErrorTitle = "並列ワーカー数の入力エラー"
+    ws.Range("A3").Validation.ErrorMessage = "1〜" & MAX_WORKER_COUNT & " の整数を入力してください。"
+    On Error GoTo 0
+
+    AddCellNote ws.Range("A1"), "空欄でも可。職場プロキシが必要な場合のみ入力してください。"
+    AddCellNote ws.Range("A2"), "必須。ここに指定したフォルダ配下に ZIP / EXTRACT / PDF / HTML / HTML_COMBINE / WORK が作成されます。"
+    AddCellNote ws.Range("A3"), "まずは 2 または 3 推奨。増やしすぎるとWordのPDF/HTML変換が不安定になる場合があります。"
+
+    FreezeTopRow ws
+
+End Sub
+
+' ============================================================
+' リンク入力シート作成
+' ============================================================
+
+Private Sub BuildLinkSheet( _
+        ByVal ws As Worksheet, _
+        ByRef linkTexts() As String, _
+        ByRef linkAddresses() As String, _
+        ByRef linkSubAddresses() As String, _
+        ByVal linkCount As Long _
+    )
+
+    Dim i As Long
+    Dim r As Long
+    Dim c As Range
+    Dim displayText As String
+    Dim addr As String
+    Dim subAddr As String
+
+    On Error Resume Next
+    ws.Name = "02_LINKS"
+    On Error GoTo 0
+
+    ws.Range("A1").Value = "ダウンロード対象リンク"
+    ws.Range("B1").Value = "URL"
+    ws.Range("C1").Value = "ダウンロード先"
+    ws.Range("D1").Value = "展開先"
+    ws.Range("E1").Value = "PDF結果"
+    ws.Range("F1").Value = "HTML結果"
+    ws.Range("G1").Value = "処理結果"
+
+    For i = 1 To linkCount
+
+        r = FIRST_LINK_ROW + i - 1
+        Set c = ws.Cells(r, "A")
+
+        displayText = linkTexts(i)
+        addr = linkAddresses(i)
+        subAddr = linkSubAddresses(i)
+
+        If Len(displayText) = 0 Then
+            If Len(addr) > 0 Then
+                displayText = addr
+            ElseIf Len(subAddr) > 0 Then
+                displayText = subAddr
+            End If
+        End If
+
+        c.Value = displayText
+
+        If Len(addr) > 0 Or Len(subAddr) > 0 Then
+            ws.Hyperlinks.Add _
+                Anchor:=c, _
+                Address:=addr, _
+                SubAddress:=subAddr, _
+                TextToDisplay:=displayText
+        End If
+
+    Next i
+
+    StyleHeaderRow ws.Range("A1:G1")
+
+    ws.Columns("A").ColumnWidth = 60
+    ws.Columns("B").ColumnWidth = 60
+    ws.Columns("C").ColumnWidth = 46
+    ws.Columns("D").ColumnWidth = 46
+    ws.Columns("E").ColumnWidth = 34
+    ws.Columns("F").ColumnWidth = 34
+    ws.Columns("G").ColumnWidth = 34
+
+    ws.Columns("A:G").WrapText = True
+    ws.Rows(1).RowHeight = 28
+
+    ws.Range("A:A").Interior.Color = RGB(255, 255, 204)
+    ws.Range("B:G").Interior.Color = RGB(248, 248, 248)
+
+    ws.Range("A1:G1").AutoFilter
+
+    If linkCount > 0 Then
+        ws.Range("A2:A" & FIRST_LINK_ROW + linkCount - 1).Font.Color = RGB(5, 99, 193)
+        ws.Range("A2:A" & FIRST_LINK_ROW + linkCount - 1).Font.Underline = xlUnderlineStyleSingle
+        ws.Range("A2:G" & FIRST_LINK_ROW + linkCount - 1).Borders.LineStyle = xlContinuous
+        ws.Range("A2:G" & FIRST_LINK_ROW + linkCount - 1).VerticalAlignment = xlVAlignTop
+    End If
+
+    ws.Range("I1").Value = "入力ルール"
+    ws.Range("I2").Value = "A2以降に、ダウンロード対象のハイパーリンクを貼り付けてください。"
+    ws.Range("I3").Value = "貼り付け後、CleanLinkSheetOnly を実行すると、書式・数式・外部更新リンクを除去し、テキストとハイパーリンクのみ保持します。"
+    ws.Range("I4").Value = "B〜G列は処理結果の出力欄です。手入力不要です。"
+    ws.Range("I1:I4").WrapText = True
+    ws.Range("I1").Font.Bold = True
+    ws.Range("I1:I4").Interior.Color = RGB(242, 242, 242)
+    ws.Columns("I").ColumnWidth = 60
+
+    AddCellNote ws.Range("A1"), "A2以降にリンクを貼り付けます。貼り付け後に CleanLinkSheetOnly を実行すると、不要な書式や更新リンクが除去されます。"
+
+    FreezeTopRow ws
+
+End Sub
+
+' ============================================================
+' README作成
+' ============================================================
+
+Private Sub BuildReadmeSheet(ByVal ws As Worksheet)
+
+    Dim r As Long
+
+    ws.Range("A1").Value = "README - 並列ダウンロード・ZIP展開・PDF/HTML作成ツール"
+    ws.Range("A1:H1").Merge
+    With ws.Range("A1:H1")
+        .Font.Bold = True
+        .Font.Size = 18
+        .Font.Color = vbWhite
+        .Interior.Color = RGB(64, 64, 64)
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlVAlignCenter
+        .RowHeight = 36
+    End With
+
+    r = 3
+
+    AddReadmeSection ws, r, "1. 入力する場所"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "シート"
+    ws.Cells(r, "B").Value = "セル・列"
+    ws.Cells(r, "C").Value = "入力内容"
+    ws.Cells(r, "D").Value = "必須"
+    ws.Cells(r, "E").Value = "例・補足"
+    StyleHeaderRow ws.Range("A" & r & ":E" & r)
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "01_SETTINGS"
+    ws.Cells(r, "B").Value = "A1"
+    ws.Cells(r, "C").Value = "プロキシアドレス"
+    ws.Cells(r, "D").Value = "任意"
+    ws.Cells(r, "E").Value = "proxy.example.go.jp:8080 または http://proxy.example.go.jp:8080"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "01_SETTINGS"
+    ws.Cells(r, "B").Value = "A2"
+    ws.Cells(r, "C").Value = "出力先ルートフォルダ"
+    ws.Cells(r, "D").Value = "必須"
+    ws.Cells(r, "E").Value = "C:\Users\ユーザ名\Downloads\download_output"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "01_SETTINGS"
+    ws.Cells(r, "B").Value = "A3"
+    ws.Cells(r, "C").Value = "並列ワーカー数"
+    ws.Cells(r, "D").Value = "任意"
+    ws.Cells(r, "E").Value = "推奨 2〜3。最大6程度。"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "02_LINKS"
+    ws.Cells(r, "B").Value = "A2以降"
+    ws.Cells(r, "C").Value = "ダウンロード対象リンク"
+    ws.Cells(r, "D").Value = "必須"
+    ws.Cells(r, "E").Value = "ハイパーリンク付きセル、またはURL文字列。貼り付け後に CleanLinkSheetOnly 推奨。"
+    r = r + 2
+
+    ws.Range("A4:E" & r - 2).Borders.LineStyle = xlContinuous
+
+    AddReadmeSection ws, r, "2. 実行するマクロ"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "マクロ名"
+    ws.Cells(r, "B").Value = "用途"
+    ws.Cells(r, "C").Value = "実行タイミング"
+    ws.Range("A" & r & ":C" & r).EntireRow.Font.Bold = True
+    StyleHeaderRow ws.Range("A" & r & ":C" & r)
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "SetupDownloaderWorkbookReadmeAndLayout"
+    ws.Cells(r, "B").Value = "README作成、Sheet1/Sheet2整形、リンク整理、外部更新リンク解除"
+    ws.Cells(r, "C").Value = "初回、または入力形式を整え直したいとき"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "CleanLinkSheetOnly"
+    ws.Cells(r, "B").Value = "Sheet2 A列のみ、テキストとハイパーリンクだけ残して整理"
+    ws.Cells(r, "C").Value = "リンクを貼り付けた直後"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "RunParallelDownloadExtractPdfHtml"
+    ws.Cells(r, "B").Value = "ダウンロード、ZIP展開、PDF化、HTML化、HTML結合を実行"
+    ws.Cells(r, "C").Value = "入力完了後"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "BreakExternalUpdateLinksOnly"
+    ws.Cells(r, "B").Value = "ブック内の外部更新リンクを解除"
+    ws.Cells(r, "C").Value = "Excel起動時に「リンク更新」が出る場合"
+    r = r + 2
+
+    ws.Range("A" & r - 6 & ":C" & r - 2).Borders.LineStyle = xlContinuous
+
+    AddReadmeSection ws, r, "3. 出力フォルダ"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "フォルダ"
+    ws.Cells(r, "B").Value = "内容"
+    StyleHeaderRow ws.Range("A" & r & ":B" & r)
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "ZIP"
+    ws.Cells(r, "B").Value = "ダウンロードしたZIP等"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "EXTRACT"
+    ws.Cells(r, "B").Value = "ZIPの展開結果"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "PDF"
+    ws.Cells(r, "B").Value = "PDF化したファイル"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "HTML"
+    ws.Cells(r, "B").Value = "Wordファイル等から作成した個別HTML"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "HTML_COMBINE"
+    ws.Cells(r, "B").Value = "個別HTMLを5件ずつまとめた結合HTML"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "WORK"
+    ws.Cells(r, "B").Value = "並列処理用のジョブ・結果ファイル"
+    r = r + 2
+
+    ws.Range("A" & r - 8 & ":B" & r - 2).Borders.LineStyle = xlContinuous
+
+    AddReadmeSection ws, r, "4. 注意事項"
+    r = r + 1
+
+    ws.Cells(r, "A").Value = "・Sheet1 の A1:A3、Sheet2 の A列は、処理マクロが参照するため位置を変更しないでください。"
+    r = r + 1
+    ws.Cells(r, "A").Value = "・リンク貼り付け後は CleanLinkSheetOnly を実行すると、外部更新リンク・数式・余計な書式を除去できます。"
+    r = r + 1
+    ws.Cells(r, "A").Value = "・PDF化およびHTML化には Microsoft Word を使用します。"
+    r = r + 1
+    ws.Cells(r, "A").Value = "・並列ワーカー数を増やしすぎると、Word COM が不安定になる場合があります。まずは 2〜3 推奨です。"
+    r = r + 1
+    ws.Cells(r, "A").Value = "・parallel_worker.vbs は、このExcelファイルと同じフォルダ、または出力先ルートフォルダに保存してください。"
+    r = r + 1
+    ws.Cells(r, "A").Value = "・READMEシートは3枚目以降に配置してください。1枚目・2枚目に移動すると既存マクロの参照がずれる可能性があります。"
+
+    ws.Range("A" & r - 6 & ":H" & r).WrapText = True
+    ws.Range("A" & r - 6 & ":H" & r).Interior.Color = RGB(255, 255, 204)
+
+    ws.Columns("A").ColumnWidth = 34
+    ws.Columns("B").ColumnWidth = 44
+    ws.Columns("C").ColumnWidth = 48
+    ws.Columns("D").ColumnWidth = 12
+    ws.Columns("E").ColumnWidth = 72
+    ws.Columns("F:H").ColumnWidth = 14
+
+    ws.Rows.AutoFit
+    FreezeTopRow ws
+
+End Sub
+
+Private Sub AddReadmeSection( _
+        ByVal ws As Worksheet, _
+        ByVal rowNo As Long, _
+        ByVal titleText As String _
+    )
+
+    ws.Range("A" & rowNo & ":H" & rowNo).Merge
+    ws.Cells(rowNo, "A").Value = titleText
+
+    With ws.Range("A" & rowNo & ":H" & rowNo)
+        .Font.Bold = True
+        .Font.Size = 13
+        .Font.Color = vbWhite
+        .Interior.Color = RGB(79, 129, 189)
+        .HorizontalAlignment = xlLeft
+        .VerticalAlignment = xlVAlignCenter
+        .RowHeight = 26
+    End With
+
+End Sub
+
+' ============================================================
+' リンク情報の保持・抽出
+' ============================================================
+
+Private Function CollectLinkRecords( _
+        ByVal ws As Worksheet, _
+        ByRef texts() As String, _
+        ByRef addresses() As String, _
+        ByRef subAddresses() As String _
+    ) As Long
+
+    Dim lastRow As Long
+    Dim r As Long
+    Dim n As Long
+
+    Dim displayText As String
+    Dim addr As String
+    Dim subAddr As String
+
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+
+    If lastRow < FIRST_LINK_ROW Then
+        CollectLinkRecords = 0
+        Exit Function
+    End If
+
+    For r = FIRST_LINK_ROW To lastRow
+
+        displayText = CellValueAsText(ws.Cells(r, "A"))
+        addr = ""
+        subAddr = ""
+
+        ExtractHyperlinkInfo ws.Cells(r, "A"), displayText, addr, subAddr
+
+        If Len(addr) = 0 And Len(subAddr) = 0 Then
+            If IsHttpUrl(displayText) Then
+                addr = displayText
+            End If
+        End If
+
+        If Len(displayText) > 0 Or Len(addr) > 0 Or Len(subAddr) > 0 Then
+
+            n = n + 1
+
+            ReDim Preserve texts(1 To n)
+            ReDim Preserve addresses(1 To n)
+            ReDim Preserve subAddresses(1 To n)
+
+            texts(n) = displayText
+            addresses(n) = addr
+            subAddresses(n) = subAddr
+
+        End If
+
+    Next r
+
+    CollectLinkRecords = n
+
+End Function
+
+Private Sub ExtractHyperlinkInfo( _
+        ByVal cell As Range, _
+        ByRef displayText As String, _
+        ByRef address As String, _
+        ByRef subAddress As String _
+    )
+
+    Dim tmpAddress As String
+    Dim tmpDisplay As String
+
+    On Error Resume Next
+
+    If cell.Hyperlinks.Count > 0 Then
+
+        address = cell.Hyperlinks(1).Address
+        subAddress = cell.Hyperlinks(1).SubAddress
+
+        If Len(displayText) = 0 Then
+            displayText = cell.Hyperlinks(1).TextToDisplay
+        End If
+
+    End If
+
+    On Error GoTo 0
+
+    If Len(address) = 0 Then
+
+        If cell.HasFormula Then
+
+            tmpAddress = ""
+            tmpDisplay = ""
+
+            If TryParseHyperlinkFormula(CStr(cell.Formula), tmpAddress, tmpDisplay) Then
+
+                address = tmpAddress
+
+                If Len(displayText) = 0 And Len(tmpDisplay) > 0 Then
+                    displayText = tmpDisplay
+                End If
+
+            End If
+
+        End If
+
+    End If
+
+    If Len(address) = 0 And IsHttpUrl(displayText) Then
+        address = displayText
+    End If
+
+End Sub
+
+Private Function TryParseHyperlinkFormula( _
+        ByVal formulaText As String, _
+        ByRef address As String, _
+        ByRef textToDisplay As String _
+    ) As Boolean
+
+    On Error GoTo ErrHandler
+
+    Dim re As Object
+    Dim matches As Object
+
+    If InStr(1, formulaText, "HYPERLINK", vbTextCompare) = 0 Then
+        TryParseHyperlinkFormula = False
+        Exit Function
+    End If
+
+    Set re = CreateObject("VBScript.RegExp")
+
+    With re
+        .Global = True
+        .IgnoreCase = True
+        .Pattern = """([^""]*)"""
+    End With
+
+    Set matches = re.Execute(formulaText)
+
+    If matches.Count >= 1 Then
+        address = CStr(matches(0).SubMatches(0))
+
+        If matches.Count >= 2 Then
+            textToDisplay = CStr(matches(1).SubMatches(0))
+        Else
+            textToDisplay = address
+        End If
+
+        TryParseHyperlinkFormula = True
+    Else
+        TryParseHyperlinkFormula = False
+    End If
+
+    Exit Function
+
+ErrHandler:
+    TryParseHyperlinkFormula = False
+
+End Function
+
+' ============================================================
+' 外部更新リンク解除
+' ============================================================
+
+Private Sub BreakExternalWorkbookLinks(ByVal showMessage As Boolean)
+
+    On Error GoTo ErrHandler
+
+    Dim links As Variant
+    Dim i As Long
+    Dim count As Long
+
+    links = ThisWorkbook.LinkSources(Type:=xlLinkTypeExcelLinks)
+
+    If IsEmpty(links) Then
+        If showMessage Then
+            MsgBox "外部更新リンクは見つかりませんでした。", vbInformation
+        End If
+        Exit Sub
+    End If
+
+    For i = LBound(links) To UBound(links)
+        ThisWorkbook.BreakLink _
+            Name:=CStr(links(i)), _
+            Type:=xlLinkTypeExcelLinks
+        count = count + 1
+    Next i
+
+    If showMessage Then
+        MsgBox "外部更新リンクを " & count & " 件解除しました。", vbInformation
+    End If
+
+    Exit Sub
+
+ErrHandler:
+    If showMessage Then
+        MsgBox "外部更新リンクの解除中にエラーが発生しました: " & Err.Description, vbExclamation
+    End If
+
+End Sub
+
+' ============================================================
+' ハードリセット
+' ============================================================
+
+Private Sub ResetWorksheetHard(ByVal ws As Worksheet)
+
+    On Error Resume Next
+
+    ws.Cells.Clear
+
+    ws.Cells.FormatConditions.Delete
+    ws.Cells.Validation.Delete
+
+    ws.Cells.Font.Name = "Yu Gothic"
+    ws.Cells.Font.Size = 10
+    ws.Cells.WrapText = False
+    ws.Cells.Interior.Pattern = xlNone
+
+    ws.Tab.ColorIndex = xlColorIndexNone
+
+    On Error GoTo 0
+
+End Sub
+
+' ============================================================
+' スタイル
+' ============================================================
+
+Private Sub StyleHeaderRow(ByVal rng As Range)
+
+    With rng
+        .Font.Bold = True
+        .Font.Color = vbWhite
+        .Interior.Color = RGB(64, 64, 64)
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlVAlignCenter
+        .Borders.LineStyle = xlContinuous
+    End With
+
+End Sub
+
+Private Sub StyleSectionHeader(ByVal rng As Range)
+
+    With rng
+        .Font.Bold = True
+        .Font.Color = vbWhite
+        .Interior.Color = RGB(79, 129, 189)
+        .HorizontalAlignment = xlLeft
+        .VerticalAlignment = xlVAlignCenter
+        .Borders.LineStyle = xlContinuous
+    End With
+
+End Sub
+
+Private Sub AddCellNote( _
+        ByVal cell As Range, _
+        ByVal noteText As String _
+    )
+
+    On Error Resume Next
+
+    cell.ClearComments
+    cell.AddComment noteText
+    cell.Comment.Visible = False
+
+    On Error GoTo 0
+
+End Sub
+
+Private Sub FreezeTopRow(ByVal ws As Worksheet)
+
+    On Error Resume Next
+
+    ws.Activate
+
+    ActiveWindow.FreezePanes = False
+    ws.Range("A2").Select
+    ActiveWindow.FreezePanes = True
+
+    On Error GoTo 0
+
+End Sub
+
+' ============================================================
+' 共通関数
+' ============================================================
+
+Private Function CellValueAsText(ByVal cell As Range) As String
+
+    On Error GoTo ErrHandler
+
+    If IsError(cell.Value) Then
+        CellValueAsText = ""
+    Else
+        CellValueAsText = Trim(CStr(cell.Value))
+    End If
+
+    Exit Function
+
+ErrHandler:
+    CellValueAsText = Trim(CStr(cell.Text))
+
+End Function
+
+Private Function IsHttpUrl(ByVal s As String) As Boolean
+
+    Dim u As String
+
+    u = LCase(Trim(s))
+
+    IsHttpUrl = _
+        Left(u, 7) = "http://" Or _
+        Left(u, 8) = "https://"
+
+End Function
